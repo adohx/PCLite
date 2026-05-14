@@ -8,6 +8,8 @@ enable_testing()
 
 include(cmake/utils.cmake)
 
+add_subdirectory(src/utilities)
+add_subdirectory(src/core)
 add_subdirectory(src/converter)
 
 add_executable(${PROJECT_NAME} main.cpp)
