@@ -10,9 +10,14 @@ include(cmake/utils.cmake)
 
 add_subdirectory(src/utilities)
 add_subdirectory(src/core)
-add_subdirectory(src/converter)
+#add_subdirectory(src/converter)
+add_subdirectory(src/viewer)
 
 add_executable(${PROJECT_NAME} main.cpp)
+target_link_libraries(${PROJECT_NAME} PRIVATE viewer)
 
-target_link_libraries(${PROJECT_NAME} PRIVATE converter)
-
+# Standalone point cloud viewer tool
+add_executable(pcl_viewer tools/pcl_viewer.cpp)
+target_link_libraries(pcl_viewer PRIVATE viewer)
+target_include_directories(pcl_viewer PRIVATE src/viewer)
+target_compile_features(pcl_viewer PRIVATE cxx_std_20)

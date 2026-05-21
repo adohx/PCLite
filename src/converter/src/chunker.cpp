@@ -97,11 +97,11 @@ public:
         return grid;
     }
 
-    Chunker::NodeLut createNodeLut(const std::vector<std::atomic_int32_t> &grid, uint gridSize) {
-        auto iterateXYZ = [](int64_t gridSize, std::function<void(int64_t, int64_t, int64_t)> callback) {
-            for (int x = 0; x < gridSize; x++) {
-                for (int y = 0; y < gridSize; y++) {
-                    for (int z = 0; z < gridSize; z++) {
+    Chunker::NodeLut createNodeLut(const std::vector<std::atomic_int32_t> &grid, uint gridSize,uint64_t maxPointsPerChunk) {
+        auto iterateXYZ = [](const int64_t gz, const std::function<void(int64_t, int64_t, int64_t)>& callback) {
+            for (int x = 0; x < gz; x++) {
+                for (int y = 0; y < gz; y++) {
+                    for (int z = 0; z < gz; z++) {
                         callback(x, y, z);
                     }
                 }
@@ -134,20 +134,9 @@ public:
                     int64_t sum = 0;
                     int64_t max = 0;
                     bool unmergeable = false;
-
-                    // loop through the 8 enclosed cells of the higher detailed grid
-                    for (int64_t j = 0; j < 8; j++) {
-                        int64_t ox = (j & 0b100) >> 2;
-                        int64_t oy = (j & 0b010) >> 1;
-                        int64_t oz = (j & 0b001) >> 0;
-
-                        int64_t nx = 2 * x + ox;
-                        int64_t ny = 2 * y + oy;
-                        int64_t nz = 2 * z + oz;
-
-                        int64_t index_high = nx + ny * gridSize_high + nz * gridSize_high * gridSize_high;
-
-                        auto value = grid_high[index_high];
+                    auto indices = subdividedIndices(x,y,z,gridSize_low);
+                      for (auto &index: indices) {
+                          auto value = grid_high[index];
 
                         if (value == -1) {
                             unmergeable = true;
@@ -156,27 +145,16 @@ public:
                         }
 
                         max = std::max(max, value);
-                    }
-
+                      }
 
                     if (unmergeable || sum > maxPointsPerChunk) {
                         // finished chunks
-                        for (int64_t j = 0; j < 8; j++) {
-                            int64_t ox = (j & 0b100) >> 2;
-                            int64_t oy = (j & 0b010) >> 1;
-                            int64_t oz = (j & 0b001) >> 0;
-
-                            int64_t nx = 2 * x + ox;
-                            int64_t ny = 2 * y + oy;
-                            int64_t nz = 2 * z + oz;
-
-                            int64_t index_high = nx + ny * gridSize_high + nz * gridSize_high * gridSize_high;
-
-                            auto value = grid_high[index_high];
-
+                        auto indices = subdividedIndices(x,y,z,gridSize_low);
+                        for (auto &index: indices) {
+                            auto value = grid_high[index];
 
                             if (value > 0) {
-                                string nodeID = toNodeID(level_high, gridSize_high, nx, ny, nz);
+                                std::string nodeID = toNodeID(level_high, gridSize_high, nx, ny, nz);
 
                                 Node node(nodeID, value);
                                 node.x = nx;
@@ -217,6 +195,41 @@ public:
         return {gridSize, lut};
     }
 
+    std::string toNodeID(int level, int gridSize, int64_t x, int64_t y, int64_t z) {
+
+        std::string id = "r";
+
+        int currentGridSize = gridSize;
+        int lx = x;
+        int ly = y;
+        int lz = z;
+
+        for (int i = 0; i < level; i++) {
+
+            int index = 0;
+
+            if (lx >= currentGridSize / 2) {
+                index = index + 0b100;
+                lx = lx - currentGridSize / 2;
+            }
+
+            if (ly >= currentGridSize / 2) {
+                index = index + 0b010;
+                ly = ly - currentGridSize / 2;
+            }
+
+            if (lz >= currentGridSize / 2) {
+                index = index + 0b001;
+                lz = lz - currentGridSize / 2;
+            }
+
+            id = id + std::to_string(index);
+            currentGridSize = currentGridSize / 2;
+        }
+
+        return id;
+    }
+
     static uint64_t coordinate2Index(const vec3d &pos, const Attributes &attributes) {
         // transfer las integer coordinates to new scale/offset/box values
         const auto x = pos.x;
@@ -246,6 +259,23 @@ public:
     }
 
     bool distributePoints(const Attributes &attributes) {
+    }
+
+    static std::vector<uint64_t> subdividedIndices(uint64_t x,uint64_t y,uint64_t z, uint64_t gridSize) {
+        std::vector<uint64_t> indices(8,-1);
+        for (int64_t j = 0; j < 8; j++) {
+            int64_t ox = (j & 0b100) >> 2;
+            int64_t oy = (j & 0b010) >> 1;
+            int64_t oz = (j & 0b001) >> 0;
+
+            int64_t nx = 2 * x + ox;
+            int64_t ny = 2 * y + oy;
+            int64_t nz = 2 * z + oz;
+
+            indices[j]= nx + ny * gridSize + nz * gridSize * gridSize;
+        }
+
+        return indices;
     }
 
 private:

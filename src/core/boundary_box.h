@@ -8,7 +8,6 @@
 
 #include "vec3.h"
 
-
 template <class T>
 class BoundaryBox {
 public:

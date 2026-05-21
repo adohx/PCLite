@@ -1,0 +1,6 @@
+#include "point_cloud_layer.h"
+#include "node_management/node_manager.h"
+
+void PointCloudLayer::render() {
+    nodeManager_->render();
+}
