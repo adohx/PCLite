@@ -8,6 +8,9 @@ enable_testing()
 
 include(cmake/utils.cmake)
 
+# Third-party dependencies (fetched automatically)
+add_subdirectory(3rd_party)
+
 add_subdirectory(src/utilities)
 add_subdirectory(src/core)
 #add_subdirectory(src/converter)

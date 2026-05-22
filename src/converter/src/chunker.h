@@ -8,7 +8,7 @@
 #include <vector>
 #include <string>
 
-#include "attributes.h"
+#include "../../core/attributes.h"
 #include "vec3.h"
 
 class Chunker {

@@ -11,5 +11,8 @@ find_package(OpenGL REQUIRED)
 find_package(SDL2   REQUIRED)
 
 add_library(${PROJECT_NAME} ${VIEWER_SRCS})
-target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(${PROJECT_NAME} PUBLIC core OpenGL::GL OpenGL::GLU SDL2::SDL2)
+target_include_directories(${PROJECT_NAME} PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${NLOHMANN_JSON_INCLUDE_DIR})
+target_link_libraries(${PROJECT_NAME} PUBLIC
+    core OpenGL::GL OpenGL::GLU SDL2::SDL2)

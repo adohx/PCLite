@@ -26,7 +26,6 @@ private:
     vec3d       bboxMin_{}, bboxMax_{};
     std::vector<std::unique_ptr<Node>> nodes_;
 
-    void parseMetadata(const std::string& path);
     void parseHierarchy(const std::string& path, uint64_t firstChunkSize);
 };
 
