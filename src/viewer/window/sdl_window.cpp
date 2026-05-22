@@ -1,5 +1,6 @@
 #include "sdl_window.h"
 #include "camera/camera.h"
+#include "mat.h"
 #include "layer/layer.h"
 #include "node_management/node_manager.h"
 #include <SDL2/SDL_opengl.h>
@@ -35,6 +36,21 @@ SDLWindow::~SDLWindow() {
     if (glContext_)  SDL_GL_DeleteContext(glContext_);
     if (sdlWindow_)  SDL_DestroyWindow(sdlWindow_);
     SDL_Quit();
+}
+
+void SDLWindow::syncOrbitFromCamera() {
+    if (cameras_.empty()) return;
+    auto& cam = *cameras_[0];
+    auto pos = cam.position();
+    auto tgt = cam.target();
+
+    float dx = (float)(pos.x - tgt.x);
+    float dy = (float)(pos.y - tgt.y);
+    float dz = (float)(pos.z - tgt.z);
+
+    distance_  = std::sqrt(dx*dx + dy*dy + dz*dz);
+    elevation_ = std::asin(std::clamp(dy / distance_, -1.f, 1.f)) * 180.f / (float)M_PI;
+    azimuth_   = std::atan2(dx, dz) * 180.f / (float)M_PI;
 }
 
 void SDLWindow::updateCameraPosition() {
@@ -110,13 +126,16 @@ void SDLWindow::render() {
     auto& cam = *cameras_[0];
 
     glMatrixMode(GL_PROJECTION);
-    glLoadMatrixf(cam.projectionMatrix().data());
+    auto proj = cam.projectionMatrix().data();  // column-major for OpenGL
+    glLoadMatrixf(proj.data());
     glMatrixMode(GL_MODELVIEW);
-    glLoadMatrixf(cam.viewMatrix().data());
+    Mat4f viewMatrix = cam.viewMatrix();
+    auto viewArr = viewMatrix.data();
+    glLoadMatrixf(viewArr.data());
 
     for (auto& layer : layers_) {
         layer->nodeManager().update(cam);
-        layer->render();
+        layer->nodeManager().render(viewMatrix);
     }
 }
 

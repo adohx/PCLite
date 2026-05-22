@@ -51,7 +51,7 @@ void NodeManager::update(const Camera& camera) {
     }
 }
 
-void NodeManager::render() {
+void NodeManager::render(const Mat4f& viewMatrix) {
     for (auto& painter : d_->painters_)
-        painter->paint();
+        painter->paint(viewMatrix);
 }

@@ -12,7 +12,7 @@ public:
 
     void addNode(Node* node)    override;
     void removeNode(Node* node) override;
-    void paint()                override;
+    void paint(const Mat4f& viewMatrix) override;
 
 private:
     PointLayout layout_;

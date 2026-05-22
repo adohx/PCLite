@@ -1,12 +1,11 @@
 #ifndef PCLITE_CAMERA_H
 #define PCLITE_CAMERA_H
 
-#include <array>
 #include "vec3.h"
+#include "mat.h"
+#include "boundary_box.h"
 
 class ManageStrategy;
-
-using mat4f = std::array<float, 16>;
 
 enum class ProjectionMode {
     Perspective,
@@ -17,8 +16,17 @@ class Camera {
 public:
     virtual ~Camera() = default;
 
-    virtual mat4f viewMatrix() const = 0;
-    virtual mat4f projectionMatrix() const = 0;
+    virtual Mat4f viewMatrix()       const = 0;
+    virtual Mat4f projectionMatrix() const = 0;
+
+    // Camera manipulation — subclasses define the concrete behaviour.
+    virtual void rotate(vec3d axis, float angleDeg) = 0;
+    virtual void translate(vec3d delta)             = 0;
+    virtual void zoom(float factor)                 = 0;
+
+    // Point the camera at a target point or the centre of a bounding box.
+    void lookAt(vec3d point);
+    void lookAt(const BoundaryBoxd& bbox);
 
     ProjectionMode projectionMode() const;
     vec3d position() const;

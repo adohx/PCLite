@@ -2,6 +2,7 @@
 #define PCLITE_NODE_MANAGER_H
 
 #include <memory>
+#include "mat.h"
 
 class Node;
 class Camera;
@@ -21,7 +22,7 @@ public:
     void update(const Camera& camera);
 
     // Calls paint() on every registered painter.
-    void render();
+    void render(const Mat4f& viewMatrix);
 
 private:
     class NodeManagerPrivate;

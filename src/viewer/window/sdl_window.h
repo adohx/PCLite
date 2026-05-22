@@ -21,6 +21,10 @@ public:
     void setOrbitAzimuth(float a)  { azimuth_  = a; }
     void setOrbitElevation(float e){ elevation_ = e; }
 
+    // Reverse-derive orbit state from camera[0]'s current position/target.
+    // Call after addCamera() + any lookAt() so the orbit stays consistent.
+    void syncOrbitFromCamera();
+
 private:
     SDL_Window*   sdlWindow_ = nullptr;
     SDL_GLContext glContext_  = nullptr;

@@ -53,7 +53,7 @@ void NodePainter::removeNode(Node* node) {
     batches_.erase(node);
 }
 
-void NodePainter::paint() {
+void NodePainter::paint(const Mat4f&) {
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_COLOR_ARRAY);
 
