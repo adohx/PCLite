@@ -36,13 +36,16 @@ struct Attribute {
     vec3d min_;
     vec3d max_;
 
+    vec3d scale_;
+    vec3d offset_;
+    
     std::vector<int64_t> histogram_ =  std::vector<int64_t>(256, 0);
 
 };
 
 struct Attributes {
 
-    std::vector<Attribute> attributes_;
+    std::vector<Attribute> attr_;
     uint32_t bytes_;
     vec3d posScale_;
     vec3d posOffset_;

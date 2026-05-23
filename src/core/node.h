@@ -1,44 +1,53 @@
 #ifndef PCLITE_NODE_H
 #define PCLITE_NODE_H
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+#include "bounding_box.h"
 #include "vec3.h"
 
 enum class NodeType : uint8_t {
     Normal = 0,
-    Leaf   = 1,
-    Proxy  = 2,
+    Leaf = 1,
+    Proxy = 2,
 };
 
-class Node {
-public:
-    Node(NodeType type, uint8_t childMask, uint32_t pointCount,
-         uint64_t address, uint64_t byteSize, vec3d min, vec3d max);
-    ~Node();
+struct Node {
+    explicit Node(const std::string &name, BoundingBoxd bb, std::shared_ptr<Node> parent = std::shared_ptr<Node>())
+        : name_(name), bb_(bb), parent_(parent) {
+        children_.resize(8);
+    }
 
-    NodeType type() const;
-    uint8_t childMask() const;
-    uint32_t pointCount() const;
-    uint64_t address() const;
-    uint64_t byteSize() const;
-    vec3d min() const;
-    vec3d max() const;
-
-    bool isLoaded() const;
-    const std::vector<uint8_t>& data() const;
-    void setData(std::vector<uint8_t> data);
-    void clearData();
-
-private:
+    std::shared_ptr<Node> parent_;
+    std::string name_{};
     NodeType type_;
     uint8_t childMask_;
-    uint32_t pointCount_;
+    uint32_t numPoints_;
+
+    BoundingBoxd bb_;
+    std::vector<uint8_t> data;
+
+    int level_ = -1;
+    uint64_t proxyChunkAddr_ = 0;
+    uint64_t proxyChunkSize_ = 0;
+    double spacing_ = 0.0;
     uint64_t address_;
     uint64_t byteSize_;
-    vec3d min_;
-    vec3d max_;
-    std::vector<uint8_t> data_;
+
+
+    bool isLoaded() const { return isLoaded_.load(); }
+    bool isLoading() const { return isLoading_.load(); }
+    void setLoading(bool v) { isLoading_.store(v); }
+    void setLoaded(bool v) { isLoaded_.store(v); }
+
+    std::vector<std::shared_ptr<Node> > children_;
+
+private:
+    std::atomic<bool> isLoading_ = false;
+    std::atomic<bool> isLoaded_ = false;
 };
 
 #endif //PCLITE_NODE_H

@@ -1,32 +1,53 @@
 #ifndef POINT_CLOUD_LOADER_H
 #define POINT_CLOUD_LOADER_H
 
+#include "node_loader.h"
+#include "attributes.h"
+#include "vec3.h"
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
-#include "point_layout.h"
-#include "node.h"
-#include "vec3.h"
+#include "bounding_box.h"
 
-class PointCloudLoader {
+class PointCloudLoader : public NodeLoader {
 public:
     explicit PointCloudLoader(const std::string& dir);
 
-    const PointLayout& layout()  const { return layout_; }
-    vec3d bboxMin()              const { return bboxMin_; }
-    vec3d bboxMax()              const { return bboxMax_; }
-    const std::string& dir()     const { return dir_; }
+    const Attributes&  attributes() const { return attributes_; }
+    vec3d              bboxMin()    const { return bboxMin_; }
+    vec3d              bboxMax()    const { return bboxMax_; }
+    const std::string& dir()        const { return dir_; }
 
-    // Transfers ownership of the loaded nodes; call once.
-    std::vector<std::unique_ptr<Node>> takeNodes() { return std::move(nodes_); }
+    void setTarget(Node& node) override;
+    void load()                override;
+private:
+    bool loadHierarchy();
+
+    BoundingBoxd createChildAABB(const BoundingBoxd &parentBB, int childIdx);
+
+    bool loadPoints();
+    void parseMetadata(const std::string& path);
+
+    template<typename T>
+    T readLittleEndian(const char* data, size_t offset) {
+        T value = 0;
+        memcpy(&value, data + offset, sizeof(T));
+        return value;
+    }
 
 private:
-    std::string dir_;
-    PointLayout layout_;
-    vec3d       bboxMin_{}, bboxMax_{};
-    std::vector<std::unique_ptr<Node>> nodes_;
+    std::string   dir_;
+    const std::string octreeFile_ = "octree.bin";
+    const std::string metadataFile_ = "metadata.json";
+    const std::string hierarchyFile_ = "hierarchy.bin";
 
-    void parseHierarchy(const std::string& path, uint64_t firstChunkSize);
+    Attributes    attributes_;
+    vec3d         bboxMin_{}, bboxMax_{};
+    uint64_t      firstChunkSize_ = 4004;
+    std::ifstream octreeFile_;
+
+
 };
 
 #endif //POINT_CLOUD_LOADER_H

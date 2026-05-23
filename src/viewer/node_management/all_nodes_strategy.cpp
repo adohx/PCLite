@@ -7,7 +7,7 @@ std::vector<Node*> AllNodesStrategy::computeNodesToLoad(
 {
     std::vector<Node*> toLoad;
     for (auto& n : nodes)
-        if (!n->isLoaded() && n->type() != NodeType::Proxy)
+        if (!n->isLoaded() && n->type != NodeType::Proxy)
             toLoad.push_back(n.get());
     return toLoad;
 }

@@ -5,7 +5,7 @@
 #include <algorithm>
 
 void BoundingBoxPainter::addNode(Node* node) {
-    nodeBBoxes_[node] = {node->min(), node->max()};
+    nodeBBoxes_[node] = {node->min, node->max};
     dirty_ = true;
 }
 

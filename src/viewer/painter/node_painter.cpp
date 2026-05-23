@@ -2,36 +2,35 @@
 #include "node.h"
 #include <SDL2/SDL_opengl.h>
 
-NodePainter::NodePainter(PointLayout layout) : layout_(std::move(layout)) {}
+NodePainter::NodePainter(Attributes attributes)
+    : attributes_(std::move(attributes)) {}
 
 NodePainter::Batch NodePainter::decode(const Node* node) const {
     Batch b;
-    const auto& data = node->data();
-    uint32_t N = node->pointCount();
+    const auto& data = node->data;
+    uint32_t N = node->numPoints_;
     if (N == 0) return b;
 
-    // Column-major storage: all N values of attr[0], then all N of attr[1], ...
-    std::vector<uint64_t> attrOffset(layout_.attrSizes.size());
-    uint64_t cursor = 0;
-    for (size_t i = 0; i < layout_.attrSizes.size(); ++i) {
-        attrOffset[i] = cursor;
-        cursor += (uint64_t)N * layout_.attrSizes[i];
-    }
-
-    // Position: int32[3] per point, world = raw * scale + offset
-    if (layout_.posIdx >= 0 && (size_t)layout_.posIdx < attrOffset.size()) {
-        const auto* raw = reinterpret_cast<const int32_t*>(data.data() + attrOffset[layout_.posIdx]);
+    // Column-major layout: block offset = getOffset(name) * N
+    int posOff = attributes_.getOffset("position");
+    if (posOff >= 0) {
+        const auto* raw = reinterpret_cast<const int32_t*>(
+            data.data() + (uint64_t)posOff * N);
         b.positions.reserve(N * 3);
         for (uint32_t i = 0; i < N; ++i) {
-            b.positions.push_back((float)(raw[i*3+0] * layout_.scale.x + layout_.offset.x));
-            b.positions.push_back((float)(raw[i*3+1] * layout_.scale.y + layout_.offset.y));
-            b.positions.push_back((float)(raw[i*3+2] * layout_.scale.z + layout_.offset.z));
+            b.positions.push_back((float)(raw[i*3+0] * attributes_.posScale_.x
+                                          + attributes_.posOffset_.x));
+            b.positions.push_back((float)(raw[i*3+1] * attributes_.posScale_.y
+                                          + attributes_.posOffset_.y));
+            b.positions.push_back((float)(raw[i*3+2] * attributes_.posScale_.z
+                                          + attributes_.posOffset_.z));
         }
     }
 
-    // RGB: uint16[3] per point, normalized to [0, 1]
-    if (layout_.rgbIdx >= 0 && (size_t)layout_.rgbIdx < attrOffset.size()) {
-        const auto* raw = reinterpret_cast<const uint16_t*>(data.data() + attrOffset[layout_.rgbIdx]);
+    int rgbOff = attributes_.getOffset("rgb");
+    if (rgbOff >= 0) {
+        const auto* raw = reinterpret_cast<const uint16_t*>(
+            data.data() + (uint64_t)rgbOff * N);
         b.colors.reserve(N * 3);
         for (uint32_t i = 0; i < N; ++i) {
             b.colors.push_back(raw[i*3+0] / 65535.f);

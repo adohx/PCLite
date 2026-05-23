@@ -3,7 +3,7 @@
 
 #include "vec3.h"
 #include "mat.h"
-#include "boundary_box.h"
+#include "bounding_box.h"
 
 class ManageStrategy;
 
@@ -26,7 +26,7 @@ public:
 
     // Point the camera at a target point or the centre of a bounding box.
     void lookAt(vec3d point);
-    void lookAt(const BoundaryBoxd& bbox);
+    void lookAt(const BoundingBoxd& bbox);
 
     ProjectionMode projectionMode() const;
     vec3d position() const;

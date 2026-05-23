@@ -2,20 +2,20 @@
 #define PCLITE_NODE_PAINTER_H
 
 #include "painter.h"
-#include "node_loader/point_layout.h"
+#include "attributes.h"
 #include <unordered_map>
 #include <vector>
 
 class NodePainter : public Painter {
 public:
-    explicit NodePainter(PointLayout layout);
+    explicit NodePainter(Attributes attributes);
 
     void addNode(Node* node)    override;
     void removeNode(Node* node) override;
     void paint(const Mat4f& viewMatrix) override;
 
 private:
-    PointLayout layout_;
+    Attributes attributes_;
 
     struct Batch {
         std::vector<float> positions;

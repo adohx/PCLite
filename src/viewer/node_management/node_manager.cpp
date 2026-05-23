@@ -34,9 +34,13 @@ void NodeManager::update(const Camera& camera) {
         auto toLoad = strategy->computeNodesToLoad(camera, d_->nodes_);
         for (auto* node : toLoad) {
             if (!node->isLoaded() && loader) {
-                node->setData(loader->load(*node));
-                for (auto& painter : d_->painters_)
-                    painter->addNode(node);
+                loader->bindCallback([node, &painters = d_->painters_](std::vector<uint8_t> data) {
+                    node->setData(std::move(data));
+                    for (auto& painter : painters)
+                        painter->addNode(node);
+                });
+                loader->setTarget(*node);
+                loader->load();
             }
         }
 

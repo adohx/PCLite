@@ -1,12 +1,12 @@
-#ifndef PCLITE_BOUNDARYBOX_H
-#define PCLITE_BOUNDARYBOX_H
+#ifndef PCLITE_BOUNDING_BOX_H
+#define PCLITE_BOUNDING_BOX_H
 
 #include "vec3.h"
 
 template <class T>
-class BoundaryBox {
+class BoundingBox {
 public:
-    BoundaryBox(vec3<T> min, vec3<T> max) : min_(min), max_(max) {}
+    BoundingBox(vec3<T> min, vec3<T> max) : min_(min), max_(max) {}
 
     vec3<T> min() const { return min_; }
     vec3<T> max() const { return max_; }
@@ -34,7 +34,7 @@ private:
     vec3<T> max_;
 };
 
-using BoundaryBoxd = BoundaryBox<double>;
-using BoundaryBoxf = BoundaryBox<float>;
+using BoundingBoxd = BoundingBox<double>;
+using BoundingBoxf = BoundingBox<float>;
 
-#endif //PCLITE_BOUNDARYBOX_H
+#endif //PCLITE_BOUNDING_BOX_H

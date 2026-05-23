@@ -57,7 +57,7 @@ public:
         return gridSize;
     }
 
-    [[nodiscard]] std::vector<std::atomic_int32_t> countPointsInCells(uint32_t gridSize, BoundaryBoxd bb) const {
+    [[nodiscard]] std::vector<std::atomic_int32_t> countPointsInCells(uint32_t gridSize, BoundingBoxd bb) const {
         std::vector<std::atomic_int32_t> grid(gridSize * gridSize * gridSize);
         auto countTask = [this,gridSize, &grid,bb](const std::unique_ptr<AttributeReader> &reader,
                                                    const uint64_t offset, int64_t numToRead) {

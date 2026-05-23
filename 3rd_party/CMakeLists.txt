@@ -14,3 +14,14 @@ FetchContent_MakeAvailable(nlohmann_json)
 set(NLOHMANN_JSON_INCLUDE_DIR
     "${nlohmann_json_SOURCE_DIR}/include"
     CACHE PATH "nlohmann/json include directory" FORCE)
+
+# ── spdlog ────────────────────────────────────────────────────────────────────
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG        v1.15.3
+    GIT_SHALLOW    TRUE
+)
+set(SPDLOG_BUILD_EXAMPLES OFF CACHE INTERNAL "")
+set(SPDLOG_BUILD_TESTS    OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(spdlog)

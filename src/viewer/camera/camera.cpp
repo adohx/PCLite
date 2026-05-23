@@ -26,7 +26,7 @@ void Camera::lookAt(vec3d point) {
     target_ = point;
 }
 
-void Camera::lookAt(const BoundaryBoxd& bbox) {
+void Camera::lookAt(const BoundingBoxd& bbox) {
     // Centre of the bounding box
     vec3d center = {
         (bbox.min().x + bbox.max().x) * 0.5,
