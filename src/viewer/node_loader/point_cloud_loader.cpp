@@ -1,14 +1,16 @@
 #include "point_cloud_loader.h"
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
-
-#include "../../../cmake-build-debug/_deps/spdlog-src/include/spdlog/fmt/bundled/base.h"
+#include <cstring>
 
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
-static vec3d vec3dFrom(const json &arr) {
-    return {arr[0].get<double>(), arr[1].get<double>(), arr[2].get<double>()};
+static vec3d vec3dFrom(const json &a) {
+    return {a[0].get<double>(), a[1].get<double>(), a[2].get<double>()};
 }
 
 static AttributeType parseType(const std::string &t) {
@@ -25,13 +27,22 @@ static AttributeType parseType(const std::string &t) {
     return AttributeType::UNDEFINED;
 }
 
-// ─── PointCloudLoader ─────────────────────────────────────────────────────────
+// ─── Construction ─────────────────────────────────────────────────────────────
 
 PointCloudLoader::PointCloudLoader(const std::string &dir) : dir_(dir) {
     parseMetadata(dir_ + "/metadata.json");
     octreeFile_.open(dir_ + "/octree.bin", std::ios::binary);
     if (!octreeFile_)
         throw std::runtime_error("Cannot open: " + dir_ + "/octree.bin");
+
+    hierarchyFile_.open(dir_ + "/hierarchy.bin", std::ios::binary);
+    if (!hierarchyFile_)
+        throw std::runtime_error("Cannot open: " + dir_ + "/hierarchy.bin");
+}
+
+PointCloudLoader::~PointCloudLoader() {
+    octreeFile_.close();
+    hierarchyFile_.close();
 }
 
 void PointCloudLoader::parseMetadata(const std::string &path) {
@@ -39,15 +50,22 @@ void PointCloudLoader::parseMetadata(const std::string &path) {
     if (!f) throw std::runtime_error("Cannot open: " + path);
     const json meta = json::parse(f);
 
-    attributes_.posOffset_ = vec3dFrom(meta["offset"]);
-    attributes_.posScale_ = vec3dFrom(meta["scale"]);
+    auto min = vec3dFrom(meta["boundingBox"]["min"]);
+    auto max = vec3dFrom(meta["boundingBox"]["max"]);
 
-    bboxMin_ = vec3dFrom(meta["boundingBox"]["min"]);
-    bboxMax_ = vec3dFrom(meta["boundingBox"]["max"]);
+    header_.version_ = meta["version"].get<std::string>();
+    header_.name_ = meta["name"].get<std::string>();
+    header_.description_ = meta["description"].get<std::string>();
+    header_.points_ = meta["points"].get<uint64_t>();
+    header_.projection_ = meta["projection"].get<std::string>();
+    header_.spacing_ = meta["spacing"].get<double>();
+    header_.bbox_ = BoundingBoxd(min, max);
+    header_.encoding_ = meta["encoding"].get<std::string>();
 
-    firstChunkSize_ = meta["hierarchy"]["firstChunkSize"].get<uint64_t>();
+    header_.firstChunk_.chunkSize_ = meta["hierarchy"]["firstChunkSize"].get<uint64_t>();
+    header_.firstChunk_.stepSize_ = meta["hierarchy"]["stepSize"].get<uint64_t>();
+    header_.firstChunk_.depth_ = meta["hierarchy"]["depth"].get<uint64_t>();
 
-    attributes_.bytes_ = 0;
     for (const auto &a: meta["attributes"]) {
         Attribute attr;
         attr.name_ = a["name"].get<std::string>();
@@ -56,193 +74,144 @@ void PointCloudLoader::parseMetadata(const std::string &path) {
         attr.numElements_ = a["numElements"].get<int>();
         attr.type_ = parseType(a["type"].get<std::string>());
 
-        auto mn = a["min"];
-        auto mx = a["max"];
-        if (mn.size() >= 3) {
-            attr.min_ = vec3dFrom(mn);
-            attr.max_ = vec3dFrom(mx);
-        } else {
-            attr.min_ = {mn[0].get<double>(), 0, 0};
-            attr.max_ = {mx[0].get<double>(), 0, 0};
-        }
+        auto mn = a["min"], mx = a["max"];
+        auto scale = a["scale"], offset = a["offset"];
 
-        attributes_.bytes_ += attr.size_;
+        attr.min_ = (mn.size() >= 3) ? vec3dFrom(mn) : vec3d{mn[0].get<double>(), 0, 0};
+        attr.max_ = (mx.size() >= 3) ? vec3dFrom(mx) : vec3d{mx[0].get<double>(), 0, 0};
+        attr.offset_ = (offset.size() >= 3) ? vec3dFrom(offset) : vec3d{0, 0, 0};
+        attr.scale_ = (scale.size() >= 3) ? vec3dFrom(scale) : vec3d{1, 1, 1};
+
         attributes_.attr_.push_back(std::move(attr));
     }
 }
 
-bool PointCloudLoader::loadHierarchy() {
-    if (target_ == nullptr)
+BoundingBoxd PointCloudLoader::createChildAABB(const BoundingBoxd &bb, int idx) {
+    auto mn = bb.min();
+    auto mx = bb.max();
+    auto size = bb.getSize();
+
+    if (idx & 1) mn.z += size.z / 2;
+    else mx.z -= size.z / 2;
+    if (idx & 2) mn.y += size.y / 2;
+    else mx.y -= size.y / 2;
+    if (idx & 4) mn.x += size.x / 2;
+    else mx.x -= size.x / 2;
+
+    return BoundingBoxd(mn, mx);
+}
+
+std::shared_ptr<Node> PointCloudLoader::loadRoot() {
+    if (header_.firstChunk_.chunkSize_ % BYTES_PER_HIERARCHY_NODE != 0)
+        return nullptr;
+
+    auto root = std::make_shared<Node>("r", BoundingBoxd(header_.bbox_));
+    root->level_ = 0;
+    root->type_ = NodeType::Proxy;
+    root->proxyChunkAddr_ = 0;
+    root->proxyChunkSize_ = header_.firstChunk_.chunkSize_;
+
+    loadHierarchyChunk(root);
+    loadPoints(root);
+
+    return root;
+}
+
+bool PointCloudLoader::loadHierarchyChunk(std::shared_ptr<Node> node) {
+    if (!node)
         return false;
-    auto hAddr = target_->address;
-    auto hSize = target_->byteSize;
-    auto buffer = std::vector<char>(hSize);
 
-    std::filesystem::path folder(dir_);
-    auto hierarchyPath = folder / hierarchyFile_;
+    auto hAddr = node->proxyChunkAddr_;
+    auto hSize = node->proxyChunkSize_;
+    if (hSize == 0) return false;
 
-    std::ifstream f(hierarchyPath, std::ios::binary);
+    std::vector<char> buffer(hSize);
 
-    if (!f)
-        throw std::runtime_error("Cannot open: " + hierarchyPath.string());
+    hierarchyFile_.seekg(static_cast<std::streamoff>(hAddr));
+    hierarchyFile_.read(buffer.data(), static_cast<std::streamsize>(hSize));
 
-    f.seekg(static_cast<std::streamoff>(hAddr));
-    f.read(buffer.data(), static_cast<std::streamsize>(hSize));
+    int numNodes = (int) (hSize / BYTES_PER_HIERARCHY_NODE);
 
-    auto bytesPerNode = 22;
-    auto numNodes = hSize / bytesPerNode;
-    auto nodes = std::vector<Node>(numNodes);
-    nodes[0] = target_;
+    std::vector<Node *> nodeList(numNodes, nullptr);
+    nodeList[0] = node.get();
 
-    auto nodePos = 1;
-    for (int i = 1; i < numNodes; i++) {
-        auto &node = nodes[i];
-        auto nodeData = buffer.data() + i * bytesPerNode;
-        auto type = *reinterpret_cast<uint8_t *>(nodeData + 0);
-        auto childMask = *reinterpret_cast<uint8_t *>(nodeData + 1);
-        auto numPoints = *reinterpret_cast<uint32_t *>(nodeData + 2);
-        auto addr = *reinterpret_cast<uint64_t *>(nodeData + 6);
-        auto size = *reinterpret_cast<uint64_t *>(nodeData + 14);
+    int nodePos = 1;
+    for (int i = 0; i < numNodes; ++i) {
+        Node *cur = nodeList[i];
+        if (!cur) break;
 
-        if (node.type == NodeType::Proxy) {
-            node.address_ = addr;
-            node.byteSize_ = size;
-        } else if (type == NodeType::Proxy) {
-            node.proxyChunkAddr_ = addr;
-            node.proxyChunkSize_ = size;
+        const char *nd = buffer.data() + i * BYTES_PER_HIERARCHY_NODE;
+        auto type = readLE<uint8_t>(nd, 0);
+        auto childMask = readLE<uint8_t>(nd, 1);
+        auto numPoints = readLE<uint32_t>(nd, 2);
+        auto addr = readLE<uint64_t>(nd, 6);
+        auto size = readLE<uint64_t>(nd, 14);
+
+        if (cur->type_ == NodeType::Proxy) {
+            cur->address_ = addr;
+            cur->byteSize_ = size;
+        } else if (static_cast<NodeType>(type) == NodeType::Proxy) {
+            cur->proxyChunkAddr_ = addr;
+            cur->proxyChunkSize_ = size;
         } else {
-            node.address_ = addr;
-            node.byteSize_ = size;
+            cur->address_ = addr;
+            cur->byteSize_ = size;
         }
-        node.type = type;
-        node.numPoints_ = numPoints;
-        if (node.byteSize_ == 0)
-            node.numPoints_ = 0;
+        cur->type_ = static_cast<NodeType>(type);
+        cur->numPoints_ = numPoints;
+        if (cur->byteSize_ == 0) cur->numPoints_ = 0;
+        if (cur->type_ == NodeType::Proxy) continue;
 
-        if (node.type_ == NodeType::Proxy) {
-            continue;
-        }
-        for (auto childIdx = 0; childIdx < 8; ++childIdx) {
-            auto childExists = ((1 << childIdx) & childMask) != 0;
-            if (childExists)
-                continue;
-
-            auto childName = node.name_ + std::to_string(childIdx);
-            auto childAABB = createChildAABB(node.bb_, childIdx);
-            auto child = std::make_shared<Node>(childName, childAABB, node);
-
-            child->spacing_ = node.spacing_ / 2.0;
-            child->level_ = node.level_ + 1;
-            node.children_[childIdx] = child;
-
-            nodes[nodePos] = child;
-            nodePos++;
+        for (int ci = 0; ci < 8; ++ci) {
+            if (!((1 << ci) & childMask)) continue;
+            auto childName = cur->name_ + std::to_string(ci);
+            auto childBB = createChildAABB(cur->bb_, ci);
+            auto child = std::make_shared<Node>(childName, childBB,
+                                                std::shared_ptr<Node>(cur, [](Node *) {
+                                                }));
+            child->spacing_ = cur->spacing_ / 2.0;
+            child->level_ = cur->level_ + 1;
+            cur->children_[ci] = child;
+            if (nodePos < numNodes)
+                nodeList[nodePos++] = child.get();
         }
     }
-
     return true;
 }
 
-BoundingBoxd PointCloudLoader::createChildAABB(const BoundingBoxd &parentBB, int childIdx) {
-    auto min = parentBB.min;
-    auto max = parentBB.max;
-    auto size = parentBB.getSize();
-
-    if ((childIdx & 0b0001) > 0) {
-        min.z += size.z / 2;
-    } else {
-        max.z -= size.z / 2;
-    }
-
-    if ((childIdx & 0b0010) > 0) {
-        min.y += size.y / 2;
-    } else {
-        max.y -= size.y / 2;
-    }
-
-    if ((childIdx & 0b0100) > 0) {
-        min.x += size.x / 2;
-    } else {
-        max.x -= size.x / 2;
-    }
-
-    return BoundingBoxd(min, max);
-}
-
-bool PointCloudLoader::loadPoints() {
-    std::map<std::string, Attribute> attributeBuffers;
-    std::vector<uint8_t> buffer;
-    uint64_t numPoints = 0;
-
-    int bytesPerPoint = 0;
-    for (const auto &a: attributes_.attr_) {
-        bytesPerPoint += a.size_;
-    }
-
-    for (const auto &attr: attributes_.attr_) {
-        uint32_t attrOffset=attributes_.getOffset(attr.name_);
-
-        if (attr.name_ == "position") {
-            auto scale=attr.scale_;
-            auto offset=attr.offset_;
-            auto min=attr.min_;
-            float *positions = reinterpret_cast<float *>(attrBuffer.buffer.data());
-            for (int i = 0; i < numPoints; i++) {
-                int pointOffset = i * bytesPerPoint;
-                int32_t rawX = readLittleEndian<int32_t>(reinterpret_cast<const char *>(buffer.data()),
-                                                         pointOffset +attrOffset + 0);
-                int32_t rawY = readLittleEndian<int32_t>(reinterpret_cast<const char *>(buffer.data()),
-                                                         pointOffset + attrOffset + 4);
-                int32_t rawZ = readLittleEndian<int32_t>(reinterpret_cast<const char *>(buffer.data()),
-                                                         pointOffset + attrOffset + 8);
-
-                float x = (rawX * scale.x) + offset.x - min.x;
-                float y = (rawY * scale.y) + offset.y - min.y;
-                float z = (rawZ * scale.z) + offset.z - min.z;
-
-                positions[3 * i + 0] = x;
-                positions[3 * i + 1] = y;
-                positions[3 * i + 2] = z;
-            }
-        }
-    }
-}
-
-void PointCloudLoader::setTarget(Node &node) {
-    target_ = &node;
-}
-
-void PointCloudLoader::load() {
-    if (!target_ || !callback_) return;
-
-    // Step 1: guard — skip if already loaded or in flight
-    if (target_->isLoaded() || target_->isLoading()) return;
-
-    // Step 2: mark in-flight
-    target_->setLoading(true);
-
+bool PointCloudLoader::loadPoints(std::shared_ptr<Node> node) {
     try {
-        // Step 3: proxy nodes carry a hierarchy chunk, not point data.
-        // Our design pre-loads the first chunk upfront so proxies in the
-        // flat list have no point data — skip them.
-        if (target_->type == NodeType::Proxy || target_->byteSize == 0) {
-            target_->setLoading(false);
-            return;
+        if (node->type_ == NodeType::Proxy) {
+           return false;
         }
 
-        // Step 4: read raw bytes from octree.bin
-        std::vector<uint8_t> data(target_->byteSize);
-        octreeFile_.seekg(static_cast<std::streamoff>(target_->address));
-        octreeFile_.read(reinterpret_cast<char *>(data.data()),
-                         static_cast<std::streamsize>(target_->byteSize));
+        auto buffer =std::vector<uint8_t>(node->byteSize_);
+        octreeFile_.seekg(node->address_);
+        octreeFile_.read(buffer->data(), node->byteSize_);
 
-        // Step 5: deliver to callback (NodeManager will call setData + notify painters)
-        callback_(std::move(data));
-    } catch (const std::exception &) {
-        target_->setLoading(false);
-        return;
+        node->data_ = std::move(buffer);
+
+        node->setLoaded(true);
+        node->setLoading(false);
+    }
+    catch (const std::exception& e) {
+        node->setLoaded(false);
+        node->setLoading(false);
+        return false;
+    }
+    return true;
+}
+
+
+bool PointCloudLoader::load(std::shared_ptr<Node> node) {
+    if (node->isLoaded() || node->isLoading()) return true;
+
+    node->setLoading(true);
+
+    if (node->type_ == NodeType::Proxy) {
+        loadHierarchyChunk(node);
+        return true;
     }
 
-    // Step 6: clear loading flag (data is now set, isLoaded() returns true)
-    target_->setLoading(false);
+    return loadPoints(node);
 }

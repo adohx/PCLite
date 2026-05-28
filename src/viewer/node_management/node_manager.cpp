@@ -1,9 +1,9 @@
 #include "node_manager.h"
 #include "camera/camera.h"
 #include "manage_strategy.h"
-#include "node_loader/node_loader.h"
+// #include "node_loader/node_loader.h"
 #include "painter/painter.h"
-#include "node.h"
+#include "../node_loader/node.h"
 
 class NodeManager::NodeManagerPrivate {
 public:
@@ -34,13 +34,13 @@ void NodeManager::update(const Camera& camera) {
         auto toLoad = strategy->computeNodesToLoad(camera, d_->nodes_);
         for (auto* node : toLoad) {
             if (!node->isLoaded() && loader) {
-                loader->bindCallback([node, &painters = d_->painters_](std::vector<uint8_t> data) {
-                    node->setData(std::move(data));
-                    for (auto& painter : painters)
-                        painter->addNode(node);
-                });
-                loader->setTarget(*node);
-                loader->load();
+                // loader->bindCallback([node, &painters = d_->painters_](std::vector<uint8_t> data) {
+                //     node->setData(std::move(data));
+                //     for (auto& painter : painters)
+                //         painter->addNode(node);
+                // });
+                // loader->setTarget(*node);
+                // loader->load();
             }
         }
 

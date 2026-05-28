@@ -3,10 +3,10 @@
 
 #include <memory>
 #include <vector>
-#include "node.h"
+#include "../node_loader/node.h"
+#include "node_loader/node_loader.h"
 
 class Camera;
-class NodeLoader;
 
 class ManageStrategy {
 public:
@@ -20,11 +20,11 @@ public:
         const Camera& camera,
         const std::vector<std::unique_ptr<Node>>& nodes) = 0;
 
-    void setNodeLoader(NodeLoader* loader);
-    NodeLoader* nodeLoader() const;
+    void setNodeLoader(NodeLoader<Node>* loader);
+    NodeLoader<Node>* nodeLoader() const;
 
 protected:
-    NodeLoader* loader_ = nullptr;
+    NodeLoader<Node>* loader_ = nullptr;
 };
 
 #endif //PCLITE_MANAGE_STRATEGY_H

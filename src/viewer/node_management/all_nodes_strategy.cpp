@@ -1,5 +1,5 @@
 #include "all_nodes_strategy.h"
-#include "node.h"
+#include "../node_loader/node.h"
 
 std::vector<Node*> AllNodesStrategy::computeNodesToLoad(
     const Camera&,
@@ -7,7 +7,7 @@ std::vector<Node*> AllNodesStrategy::computeNodesToLoad(
 {
     std::vector<Node*> toLoad;
     for (auto& n : nodes)
-        if (!n->isLoaded() && n->type != NodeType::Proxy)
+        if (!n->isLoaded() && n->type_ != NodeType::Proxy)
             toLoad.push_back(n.get());
     return toLoad;
 }

@@ -1,5 +1,5 @@
 #include "node_painter.h"
-#include "node.h"
+#include "../node_loader/node.h"
 #include <SDL2/SDL_opengl.h>
 
 NodePainter::NodePainter(Attributes attributes)
@@ -18,12 +18,12 @@ NodePainter::Batch NodePainter::decode(const Node* node) const {
             data.data() + (uint64_t)posOff * N);
         b.positions.reserve(N * 3);
         for (uint32_t i = 0; i < N; ++i) {
-            b.positions.push_back((float)(raw[i*3+0] * attributes_.posScale_.x
-                                          + attributes_.posOffset_.x));
-            b.positions.push_back((float)(raw[i*3+1] * attributes_.posScale_.y
-                                          + attributes_.posOffset_.y));
-            b.positions.push_back((float)(raw[i*3+2] * attributes_.posScale_.z
-                                          + attributes_.posOffset_.z));
+            // b.positions.push_back((float)(raw[i*3+0] * attributes_.posScale_.x
+            //                               + attributes_.posOffset_.x));
+            // b.positions.push_back((float)(raw[i*3+1] * attributes_.posScale_.y
+            //                               + attributes_.posOffset_.y));
+            // b.positions.push_back((float)(raw[i*3+2] * attributes_.posScale_.z
+            //                               + attributes_.posOffset_.z));
         }
     }
 

@@ -6,26 +6,14 @@
 #include <cstdint>
 #include "node.h"
 
-// Base loader: stores a callback and a target node.
-// Subclasses call bindCallback() before use, setTarget() before each load().
+template <typename T>
 class NodeLoader {
 public:
-    using DataCallback = std::function<void(std::vector<uint8_t>)>;
-
     virtual ~NodeLoader() = default;
 
-    // Set what to do with the loaded bytes (call once or per-node).
-    void bindCallback(DataCallback cb) { callback_ = std::move(cb); }
+    virtual bool load(std::shared_ptr<T> node) = 0;
+    virtual std::shared_ptr<T> loadRoot() =0;
 
-    // Tell the loader which node to load next.
-    virtual void setTarget(Node& node) = 0;
-
-    // Load the target set by setTarget() and deliver via callback_.
-    virtual void load() = 0;
-
-protected:
-    DataCallback callback_;
-    Node*        target_ = nullptr;
 };
 
 #endif //PCLITE_NODE_LOADER_H

@@ -46,10 +46,6 @@ struct Attribute {
 struct Attributes {
 
     std::vector<Attribute> attr_;
-    uint32_t bytes_;
-    vec3d posScale_;
-    vec3d posOffset_;
-
 
     int getOffset(const std::string& name) const;
     Attribute getAttribute(const std::string& name);

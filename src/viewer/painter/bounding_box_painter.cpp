@@ -1,11 +1,11 @@
 #include "bounding_box_painter.h"
-#include "node.h"
+#include "../node_loader/node.h"
 #include <SDL2/SDL_opengl.h>
 #include <limits>
 #include <algorithm>
 
 void BoundingBoxPainter::addNode(Node* node) {
-    nodeBBoxes_[node] = {node->min, node->max};
+    nodeBBoxes_[node] = std::make_pair(node->bb_.min(), node->bb_.max());
     dirty_ = true;
 }
 
