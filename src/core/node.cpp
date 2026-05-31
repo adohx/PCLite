@@ -32,7 +32,7 @@ bool Node::setData(const std::vector<uint8_t>& data, const Attributes& attribute
             auto x=readInt(data.data(),i*totalBytes+posOffset+0)*posAttr.scale_.x + posAttr.offset_.x;
             auto y=readInt(data.data(),i*totalBytes+posOffset+4)*posAttr.scale_.y + posAttr.offset_.y;
             auto z=readInt(data.data(),i*totalBytes+posOffset+8)*posAttr.scale_.z + posAttr.offset_.z;
-
+            tightBB_.expand({x, y, z});
             points_.push_back(std::move(vec3f(x,y,z)));
         }
     }

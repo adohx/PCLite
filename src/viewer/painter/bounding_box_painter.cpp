@@ -5,7 +5,7 @@
 #include <algorithm>
 
 void BoundingBoxPainter::addNode(Node* node) {
-    nodeBBoxes_[node] = std::make_pair(node->bb_.min(), node->bb_.max());
+    nodeBBoxes_[node] = std::make_pair(node->tightBB_.min(), node->tightBB_.max());
     dirty_ = true;
 }
 

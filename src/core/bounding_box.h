@@ -7,7 +7,7 @@ template <class T>
 class BoundingBox {
 public:
     BoundingBox() : min_(), max_() {}
-    BoundingBox(vec3<T> min, vec3<T> max) : min_(min), max_(max) {}
+    BoundingBox(vec3<T> min, vec3<T> max) : min_(min), max_(max) ,valid_(true){}
 
     vec3<T> min()     const { return min_; }
     vec3<T> max()     const { return max_; }
@@ -17,6 +17,7 @@ public:
         if (p.x < min_.x) min_.x = p.x;  if (p.x > max_.x) max_.x = p.x;
         if (p.y < min_.y) min_.y = p.y;  if (p.y > max_.y) max_.y = p.y;
         if (p.z < min_.z) min_.z = p.z;  if (p.z > max_.z) max_.z = p.z;
+        valid_ = true;
     }
 
     vec3<T> operator-(const vec3<T>& p) const {
@@ -27,8 +28,10 @@ public:
         };
     }
 
+    bool isValid() const { return valid_; }
 private:
     vec3<T> min_, max_;
+    bool valid_ = false;
 };
 
 using BoundingBoxd = BoundingBox<double>;
