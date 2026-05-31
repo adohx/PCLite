@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     auto dataset = std::make_unique<PointCloudLoader>(argv[1]);
     auto root    = dataset->loadRoot();
 
-    auto bb    = dataset->boundingBox();
+    auto bb    = root->tightBB_;
     auto bbMin = bb.min();
     auto bbMax = bb.max();
     float span = (float)std::max({bbMax.x - bbMin.x,

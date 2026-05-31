@@ -19,6 +19,12 @@ enum class NodeType : uint8_t {
 };
 
 struct Node {
+    template <typename T>
+    static auto readData(const uint8_t* data,int offset)->T {
+        auto addr=data+offset;
+        return *reinterpret_cast<const T*>(addr);
+    };
+
     explicit Node(const std::string &name, BoundingBoxd bb,
                   std::shared_ptr<Node> parent = nullptr)
         : name_(name), bb_(bb), parent_(std::move(parent)) { children_.resize(8); }

@@ -18,31 +18,31 @@ bool Node::setData(const std::vector<uint8_t>& data, const Attributes& attribute
     auto posOffset = attributes_.getOffset("position");
     auto totalBytes = attributes_.getTotalBytes();
 
-    auto readInt = [&](const uint8_t* data,int offset) -> double {
-        auto addr=data+offset;
-        return *reinterpret_cast<const int*>(addr);
-    };
 
     if (!posAttr.name_.empty() && posAttr.numElements_ >= 3) {
         points_.clear();
         points_.reserve(N);
 
         for (auto i=0;i<N;++i) {
-
-            auto x=readInt(data.data(),i*totalBytes+posOffset+0)*posAttr.scale_.x + posAttr.offset_.x;
-            auto y=readInt(data.data(),i*totalBytes+posOffset+4)*posAttr.scale_.y + posAttr.offset_.y;
-            auto z=readInt(data.data(),i*totalBytes+posOffset+8)*posAttr.scale_.z + posAttr.offset_.z;
+            auto x=readData<int>(data.data(),i*totalBytes+posOffset+0)*posAttr.scale_.x + posAttr.offset_.x;
+            auto y=readData<int>(data.data(),i*totalBytes+posOffset+4)*posAttr.scale_.y + posAttr.offset_.y;
+            auto z=readData<int>(data.data(),i*totalBytes+posOffset+8)*posAttr.scale_.z + posAttr.offset_.z;
             tightBB_.expand({x, y, z});
             points_.push_back(std::move(vec3f(x,y,z)));
         }
     }
 
-    for (const char* name : {"rgb", "rgba"}) {
-        Attribute colorAttr = attributes_.getAttribute(name);
-        if (!colorAttr.name_.empty() && colorAttr.numElements_ >= 3) {
-            uint64_t blockOff = attributes_.getOffset(name) * N;
-            colors_ = decodeBlock(data, N, colorAttr, blockOff);
-            break;
+    Attribute rgbAddr = attributes_.getAttribute("rgb");
+    auto rgbOffset = attributes_.getOffset("rgb");
+    if (!rgbAddr.name_.empty() && rgbAddr.numElements_ >= 3) {
+        colors_.clear();
+        colors_.reserve(N);
+
+        for (auto i=0;i<N;++i) {
+            auto r=readData<uint16_t>(data.data(),i*totalBytes+rgbOffset+0)*rgbAddr.scale_.x + rgbAddr.offset_.x;
+            auto g=readData<uint16_t>(data.data(),i*totalBytes+rgbOffset+2)*rgbAddr.scale_.y + rgbAddr.offset_.y;
+            auto b=readData<uint16_t>(data.data(),i*totalBytes+rgbOffset+4)*rgbAddr.scale_.z + rgbAddr.offset_.z;
+            colors_.push_back(std::move(vec3f(r,g,b)));
         }
     }
 
