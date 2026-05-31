@@ -13,7 +13,7 @@
 #include "painter/node_painter.h"
 #include "painter/bounding_box_painter.h"
 #include "painter/axis_painter.h"
-#include "../src/viewer/node_loader/node.h"
+#include "../src/core/node.h"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
     strategy->setNodeLoader(dataset.get());
 
     auto& mgr = layer->nodeManager();
+    mgr.addTree(root);
     mgr.addStrategy(std::move(strategy));
     mgr.addPainter(std::make_unique<NodePainter>(dataset->attributes()));
     mgr.addPainter(std::make_unique<BoundingBoxPainter>());

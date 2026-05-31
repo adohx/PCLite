@@ -1,7 +1,7 @@
 #ifndef PCLITE_PAINTER_H
 #define PCLITE_PAINTER_H
 
-#include "../node_loader/node.h"
+#include "../../core/node.h"
 #include "mat.h"
 
 class Painter {

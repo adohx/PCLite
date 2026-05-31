@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "../../core/attributes.h"
-#include "../../core/bounding_box.h"
-#include "../../core/vec3.h"
+#include "attributes.h"
+#include "bounding_box.h"
+#include "vec3.h"
 
 enum class NodeType : uint8_t {
     Normal = 0,
@@ -43,18 +43,31 @@ struct Node {
     int    level_   = -1;
     double spacing_ = 0.0;
 
-    // ── Point data (raw bytes from octree.bin) ────────────────────────────────
-    std::vector<uint8_t> data_;
-
     // ── State ─────────────────────────────────────────────────────────────────
     bool isLoaded()  const { return isLoaded_.load(); }
     bool isLoading() const { return isLoading_.load(); }
     void setLoaded(bool v)  { isLoaded_.store(v); }
     void setLoading(bool v) { isLoading_.store(v); }
+    void clearData() {
+        points_.clear();
+        colors_.clear();
+        isLoaded_.store(false);
+    }
 
+    bool setData(const std::vector<uint8_t>& data, const Attributes& attributes);
+    std::vector<vec3f> getPoints() const;
+    std::vector<vec3f> getColors() const;
+private:
+    std::vector<vec3f> decodeBlock(const std::vector<uint8_t>& data,
+                                   uint64_t N,
+                                   const Attribute& attr,
+                                   uint64_t blockOff) const;
 private:
     std::atomic<bool> isLoaded_{false};
     std::atomic<bool> isLoading_{false};
+    Attributes attributes_;
+    std::vector<vec3f> points_;
+    std::vector<vec3f> colors_;
 };
 
 #endif //PCLITE_NODE_H

@@ -14,7 +14,9 @@ public:
     NodeManager();
     ~NodeManager();
 
-    void addNode(std::unique_ptr<Node> node);
+    void addNode(std::shared_ptr<Node> node);
+    // Recursively collect every non-proxy node from the tree rooted at root.
+    void addTree(std::shared_ptr<Node> root);
     void addStrategy(std::unique_ptr<ManageStrategy> strategy);
     void addPainter(std::unique_ptr<Painter> painter);
 

@@ -1,5 +1,5 @@
 #include "bounding_box_painter.h"
-#include "../node_loader/node.h"
+#include "../../core/node.h"
 #include <SDL2/SDL_opengl.h>
 #include <limits>
 #include <algorithm>

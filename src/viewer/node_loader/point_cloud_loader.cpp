@@ -5,6 +5,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <cstring>
+#include <iostream>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -31,12 +32,12 @@ static AttributeType parseType(const std::string &t) {
 
 PointCloudLoader::PointCloudLoader(const std::string &dir) : dir_(dir) {
     parseMetadata(dir_ + "/metadata.json");
-    octreeFile_.open(dir_ + "/octree.bin", std::ios::binary);
-    if (!octreeFile_)
+    octreeFile_.open(dir_ + "/octree.bin", std::ios::in|std::ios::binary);
+    if (!octreeFile_.is_open())
         throw std::runtime_error("Cannot open: " + dir_ + "/octree.bin");
 
-    hierarchyFile_.open(dir_ + "/hierarchy.bin", std::ios::binary);
-    if (!hierarchyFile_)
+    hierarchyFile_.open(dir_ + "/hierarchy.bin", std::ios::in|std::ios::binary);
+    if (!hierarchyFile_.is_open())
         throw std::runtime_error("Cannot open: " + dir_ + "/hierarchy.bin");
 }
 
@@ -70,7 +71,7 @@ void PointCloudLoader::parseMetadata(const std::string &path) {
         Attribute attr;
         attr.name_ = a["name"].get<std::string>();
         attr.description_ = a["description"].get<std::string>();
-        attr.size_ = a["size"].get<int>();
+        attr.bytes_ = a["size"].get<int>();
         attr.numElements_ = a["numElements"].get<int>();
         attr.type_ = parseType(a["type"].get<std::string>());
 
@@ -82,7 +83,7 @@ void PointCloudLoader::parseMetadata(const std::string &path) {
         attr.offset_ = (offset.size() >= 3) ? vec3dFrom(offset) : vec3d{0, 0, 0};
         attr.scale_ = (scale.size() >= 3) ? vec3dFrom(scale) : vec3d{1, 1, 1};
 
-        attributes_.attr_.push_back(std::move(attr));
+        attributes_.pushAttribute(attr);
     }
 }
 
@@ -128,7 +129,9 @@ bool PointCloudLoader::loadHierarchyChunk(std::shared_ptr<Node> node) {
     std::vector<char> buffer(hSize);
 
     hierarchyFile_.seekg(static_cast<std::streamoff>(hAddr));
-    hierarchyFile_.read(buffer.data(), static_cast<std::streamsize>(hSize));
+    if (!hierarchyFile_.read(buffer.data(), static_cast<std::streamsize>(hSize))) {
+        std::cerr<<"读取header失败"<<std::endl;
+    }
 
     int numNodes = (int) (hSize / BYTES_PER_HIERARCHY_NODE);
 
@@ -185,12 +188,14 @@ bool PointCloudLoader::loadPoints(std::shared_ptr<Node> node) {
            return false;
         }
 
-        auto buffer =std::vector<uint8_t>(node->byteSize_);
+        auto buffer = std::vector<uint8_t>(node->byteSize_);
         octreeFile_.seekg(node->address_);
-        octreeFile_.read(buffer->data(), node->byteSize_);
+        if (!octreeFile_.read(reinterpret_cast<char*>(buffer.data()), node->byteSize_)){
+            auto failed=true;
+            std::cerr << "读取文件失败: " << std::strerror(errno) << std::endl;
+        }
 
-        node->data_ = std::move(buffer);
-
+        node->setData(std::move(buffer), attributes_);
         node->setLoaded(true);
         node->setLoading(false);
     }

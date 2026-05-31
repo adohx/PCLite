@@ -3,7 +3,7 @@
 
 #include <memory>
 #include <vector>
-#include "../node_loader/node.h"
+#include "../../core/node.h"
 #include "node_loader/node_loader.h"
 
 class Camera;
@@ -14,11 +14,11 @@ public:
 
     virtual std::vector<Node*> computeNodesToLoad(
         const Camera& camera,
-        const std::vector<std::unique_ptr<Node>>& nodes) = 0;
+        const std::vector<std::shared_ptr<Node>>& nodes) = 0;
 
     virtual std::vector<Node*> computeNodesToCull(
         const Camera& camera,
-        const std::vector<std::unique_ptr<Node>>& nodes) = 0;
+        const std::vector<std::shared_ptr<Node>>& nodes) = 0;
 
     void setNodeLoader(NodeLoader<Node>* loader);
     NodeLoader<Node>* nodeLoader() const;

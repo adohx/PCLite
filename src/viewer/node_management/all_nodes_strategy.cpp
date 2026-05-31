@@ -1,9 +1,9 @@
 #include "all_nodes_strategy.h"
-#include "../node_loader/node.h"
+#include "../../core/node.h"
 
 std::vector<Node*> AllNodesStrategy::computeNodesToLoad(
     const Camera&,
-    const std::vector<std::unique_ptr<Node>>& nodes)
+    const std::vector<std::shared_ptr<Node>>& nodes)
 {
     std::vector<Node*> toLoad;
     for (auto& n : nodes)
@@ -14,7 +14,7 @@ std::vector<Node*> AllNodesStrategy::computeNodesToLoad(
 
 std::vector<Node*> AllNodesStrategy::computeNodesToCull(
     const Camera&,
-    const std::vector<std::unique_ptr<Node>>&)
+    const std::vector<std::shared_ptr<Node>>&)
 {
     return {};
 }

@@ -4,7 +4,7 @@
 #include <functional>
 #include <vector>
 #include <cstdint>
-#include "node.h"
+#include "../../core/node.h"
 
 template <typename T>
 class NodeLoader {

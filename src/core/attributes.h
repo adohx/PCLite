@@ -6,6 +6,7 @@
 #define PCLITE_ATTRIBUTES_H
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "vec3.h"
 
@@ -29,7 +30,7 @@ enum class AttributeType {
 struct Attribute {
     std::string name_;
     std::string description_;
-    int size_;
+    int bytes_;
     int numElements_;
     AttributeType type_;
 
@@ -43,12 +44,18 @@ struct Attribute {
 
 };
 
-struct Attributes {
+struct Attributes:public std::vector<Attribute> {
 
-    std::vector<Attribute> attr_;
+    Attributes() = default;
 
-    int getOffset(const std::string& name) const;
+    bool pushAttribute(const Attribute& attr);
+    uint64_t getOffset(const std::string& name) const;
     Attribute getAttribute(const std::string& name);
+    uint64_t getTotalBytes() const;
+private:
+    uint64_t totalBytes_ = 0;
+    std::unordered_map<std::string, uint64_t> nameToOffset_;
+    std::unordered_map<std::string, int> nameToAttrIdx_;
 };
 
 #endif //PCLITE_ATTRIBUTES_H
