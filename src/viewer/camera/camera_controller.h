@@ -7,6 +7,9 @@ class CameraController {
 public:
     virtual ~CameraController() = default;
 
+    // Called by the window when a mouse button is first pressed.
+    virtual void onMouseButtonDown(int /*button*/, float /*x*/, float /*y*/) {}
+
     // Called by the window when a button is held and the mouse moves.
     virtual void onMouseDrag(int button, float dx, float dy) = 0;
 
@@ -18,6 +21,12 @@ public:
 
     // Initialise controller state from a camera that has already been positioned.
     virtual void syncFromCamera(const Camera& cam) = 0;
+
+    // Called every frame before applyToCamera; dt is seconds since last frame.
+    virtual void update(float /*dt*/) {}
+
+    // Called by the window on key press / release.
+    virtual void onKey(int /*key*/, bool /*pressed*/) {}
 
     // Push the controller's current state into the camera (called every frame).
     virtual void applyToCamera(Camera& cam) const = 0;

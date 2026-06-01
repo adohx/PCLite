@@ -7,7 +7,7 @@
 
 #include "window/sdl_window.h"
 #include "camera/perspective_camera.h"
-#include "camera/orbit_controller.h"
+#include "camera/arcball_controller.h"
 #include "layer/point_cloud_layer.h"
 #include "node_management/sse_lru_strategy.h"
 #include "node_loader/point_cloud_loader.h"
@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
     camera->setFarPlane(span * 10.f);
     camera->lookAt(bb);
 
-    auto controller = std::make_unique<OrbitController>();
+    auto controller = std::make_unique<ArcballController>();
     controller->syncFromCamera(*camera);
 
     SDLWindow window(800, 600, "PCLite Viewer");

@@ -57,7 +57,13 @@ void SDLWindow::handleEvent(const SDL_Event& e) {
 
     case SDL_KEYDOWN:
         if (e.key.keysym.sym == SDLK_ESCAPE) running_ = false;
+        if (controller_) controller_->onKey(e.key.keysym.sym, true);
         onKeyEvent(e.key.keysym.sym, true);
+        break;
+
+    case SDL_KEYUP:
+        if (controller_) controller_->onKey(e.key.keysym.sym, false);
+        onKeyEvent(e.key.keysym.sym, false);
         break;
 
     case SDL_MOUSEBUTTONDOWN:
@@ -71,6 +77,7 @@ void SDLWindow::handleEvent(const SDL_Event& e) {
             lastMouseX_    = e.button.x;
             lastMouseY_    = e.button.y;
         }
+        if (controller_) controller_->onMouseButtonDown(e.button.button, (float)e.button.x, (float)e.button.y);
         onMouseButton((float)e.button.x, (float)e.button.y, e.button.button, true);
         break;
 
@@ -131,19 +138,26 @@ void SDLWindow::run() {
     int frameCount = 0;
 
     running_ = true;
+    auto lastTime = Clock::now();
     while (running_) {
+        auto now = Clock::now();
+        float dt = std::chrono::duration<float>(now - lastTime).count();
+        lastTime = now;
+        dt = std::min(dt, 0.1f);  // clamp to avoid large jumps when paused
+
         SDL_Event e;
         while (SDL_PollEvent(&e))
             handleEvent(e);
 
-        if (controller_ && !cameras_.empty())
-            controller_->applyToCamera(*cameras_[0]);
+        if (controller_) {
+            controller_->update(dt);
+            if (!cameras_.empty()) controller_->applyToCamera(*cameras_[0]);
+        }
 
         render();
         SDL_GL_SwapWindow(sdlWindow_);
 
         ++frameCount;
-        auto now = Clock::now();
         float elapsed = std::chrono::duration<float>(now - fpsTimer).count();
         if (elapsed >= 1.0f) {
             float fps = frameCount / elapsed;

@@ -1,15 +1,16 @@
-#ifndef PCLITE_ORBIT_CONTROLLER_H
-#define PCLITE_ORBIT_CONTROLLER_H
+#ifndef PCLITE_TURNTABLE_CONTROLLER_H
+#define PCLITE_TURNTABLE_CONTROLLER_H
 
 #include "camera_controller.h"
 #include "vec3.h"
 
-// Orbit (turntable) camera controller.
+// Turntable orbit controller.
+// State: azimuth/elevation/distance (spherical coordinates).
 //
-// Mouse button 1 (left)  + drag  → rotate (azimuth / elevation)
-// Mouse button 3 (right) + drag  → pan (translate target in screen plane)
-// Scroll wheel                   → zoom (change distance)
-class OrbitController : public CameraController {
+// Left drag  : azimuth (world Y) + elevation (clamped to ±89°)
+// Right drag : pan
+// Scroll     : zoom
+class TurntableController : public CameraController {
 public:
     void onMouseDrag(int button, float dx, float dy) override;
     void onScroll(float delta) override;
@@ -24,6 +25,8 @@ private:
     vec3d target_    = {0.0, 0.0, 0.0};
     float fov_       = 60.f;
     int   height_    = 600;
+
+    void applyPan(float dx, float dy);
 };
 
-#endif // PCLITE_ORBIT_CONTROLLER_H
+#endif // PCLITE_TURNTABLE_CONTROLLER_H
