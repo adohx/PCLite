@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
     camera->setFarPlane(span * 10.f);
     camera->lookAt(bb);
 
-    SDLWindow window(1280, 800, "PCLite Viewer");
+    SDLWindow window(800, 600, "PCLite Viewer");
     window.addCamera(std::move(camera));
     window.addLayer(std::move(layer));
     window.syncOrbitFromCamera();

@@ -29,6 +29,7 @@ private:
     SDL_Window*   sdlWindow_ = nullptr;
     SDL_GLContext glContext_  = nullptr;
     bool          running_   = false;
+    std::string   title_;
 
     float azimuth_    = 45.f;
     float elevation_  = 30.f;

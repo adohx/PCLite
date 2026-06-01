@@ -5,6 +5,7 @@
 #include "node_management/node_manager.h"
 #include <SDL2/SDL_opengl.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 
@@ -15,6 +16,7 @@ SDLWindow::SDLWindow(int w, int h, const std::string& title) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
+    title_ = title;
     sdlWindow_ = SDL_CreateWindow(title.c_str(),
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
@@ -140,6 +142,10 @@ void SDLWindow::render() {
 }
 
 void SDLWindow::run() {
+    using Clock = std::chrono::steady_clock;
+    auto fpsTimer = Clock::now();
+    int frameCount = 0;
+
     running_ = true;
     while (running_) {
         SDL_Event e;
@@ -149,5 +155,16 @@ void SDLWindow::run() {
         updateCameraPosition();
         render();
         SDL_GL_SwapWindow(sdlWindow_);
+
+        ++frameCount;
+        auto now = Clock::now();
+        float elapsed = std::chrono::duration<float>(now - fpsTimer).count();
+        if (elapsed >= 1.0f) {
+            float fps = frameCount / elapsed;
+            SDL_SetWindowTitle(sdlWindow_,
+                (title_ + "  |  FPS: " + std::to_string(static_cast<int>(fps))).c_str());
+            fpsTimer = now;
+            frameCount = 0;
+        }
     }
 }
