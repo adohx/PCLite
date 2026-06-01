@@ -12,11 +12,10 @@ class ManageStrategy {
 public:
     virtual ~ManageStrategy() = default;
 
-    virtual std::vector<Node*> computeNodesToLoad(
-        const Camera& camera,
-        const std::vector<std::shared_ptr<Node>>& nodes) = 0;
-
-    virtual std::vector<Node*> computeNodesToCull(
+    // Returns the set of nodes that should be active (loaded and rendered) this
+    // frame.  NodeManager loads any nodes in the set that are not yet loaded,
+    // and culls any nodes previously active but absent from the new set.
+    virtual std::vector<Node*> evaluate(
         const Camera& camera,
         const std::vector<std::shared_ptr<Node>>& nodes) = 0;
 

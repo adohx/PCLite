@@ -4,6 +4,7 @@
 #include "painter/painter.h"
 #include "../../core/node.h"
 #include <unordered_set>
+#include <vector>
 
 class NodeManager::NodeManagerPrivate {
 public:
@@ -37,38 +38,35 @@ void NodeManager::addPainter(std::unique_ptr<Painter> painter) {
 }
 
 void NodeManager::update(const Camera& camera) {
-    // First pass: nodes already loaded (e.g. synchronously by loadRoot) but not yet in painters.
-    for (auto& n : d_->nodes_) {
-        if (n->isLoaded() && d_->inPainters_.insert(n.get()).second) {
-            for (auto& painter : d_->painters_)
-                painter->addNode(n.get());
-        }
-    }
-
     for (auto& strategy : d_->strategies_) {
         auto* loader = strategy->nodeLoader();
 
-        // Second pass: nodes that still need loading.
-        auto toLoad = strategy->computeNodesToLoad(camera, d_->nodes_);
-        for (auto* node : toLoad) {
-            if (loader) {
+        auto desired    = strategy->evaluate(camera, d_->nodes_);
+        auto desiredSet = std::unordered_set<Node*>(desired.begin(), desired.end());
+
+        // Load and paint newly desired nodes.
+        for (Node* node : desired) {
+            if (loader && !node->isLoaded() && !node->isLoading()) {
                 auto sp = std::shared_ptr<Node>(node, [](Node*){});
                 loader->load(sp);
-                if (node->isLoaded() && d_->inPainters_.insert(node).second) {
-                    for (auto& painter : d_->painters_)
-                        painter->addNode(node);
-                }
+            }
+            if (node->isLoaded() && d_->inPainters_.insert(node).second) {
+                for (auto& painter : d_->painters_)
+                    painter->addNode(node);
             }
         }
 
-        auto toCull = strategy->computeNodesToCull(camera, d_->nodes_);
-        for (auto* node : toCull) {
-            if (node->isLoaded()) {
-                for (auto& painter : d_->painters_)
-                    painter->removeNode(node);
-                d_->inPainters_.erase(node);
-                node->clearData();
-            }
+        // Cull nodes that the strategy no longer wants.
+        std::vector<Node*> toCull;
+        for (Node* active : d_->inPainters_)
+            if (!desiredSet.count(active))
+                toCull.push_back(active);
+
+        for (Node* node : toCull) {
+            for (auto& painter : d_->painters_)
+                painter->removeNode(node);
+            d_->inPainters_.erase(node);
+            node->clearData();
         }
     }
 }

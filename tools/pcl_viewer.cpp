@@ -8,7 +8,7 @@
 #include "window/sdl_window.h"
 #include "camera/orbit_camera.h"
 #include "layer/point_cloud_layer.h"
-#include "node_management/all_nodes_strategy.h"
+#include "node_management/sse_lru_strategy.h"
 #include "node_loader/point_cloud_loader.h"
 #include "painter/node_painter.h"
 #include "painter/bounding_box_painter.h"
@@ -35,7 +35,9 @@ int main(int argc, char** argv) {
         bbMin.x, bbMin.y, bbMin.z, bbMax.x, bbMax.y, bbMax.z, span);
 
     auto layer    = std::make_unique<PointCloudLayer>();
-    auto strategy = std::make_unique<AllNodesStrategy>();
+    auto strategy = std::make_unique<SSELruStrategy>(/*screenHeight=*/800,
+                                                        /*sseThreshold=*/1.0f,
+                                                        /*maxLoadedNodes=*/1000);
     strategy->setNodeLoader(dataset.get());
 
     auto& mgr = layer->nodeManager();

@@ -107,8 +107,9 @@ std::shared_ptr<Node> PointCloudLoader::loadRoot() {
         return nullptr;
 
     auto root = std::make_shared<Node>("r", BoundingBoxd(header_.bbox_));
-    root->level_ = 0;
-    root->type_ = NodeType::Proxy;
+    root->level_   = 0;
+    root->type_    = NodeType::Proxy;
+    root->spacing_ = header_.spacing_;   // propagated to children as spacing/2 per level
     root->proxyChunkAddr_ = 0;
     root->proxyChunkSize_ = header_.firstChunk_.chunkSize_;
 
@@ -215,6 +216,7 @@ bool PointCloudLoader::load(std::shared_ptr<Node> node) {
 
     if (node->type_ == NodeType::Proxy) {
         loadHierarchyChunk(node);
+        node->setLoading(false);  // hierarchy expanded; point data still needs a separate load call
         return true;
     }
 
