@@ -3,6 +3,10 @@ project(PCLite)
 
 set(CMAKE_CXX_STANDARD 20)
 
+if(MSVC)
+    add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+
 include(cmake/googletest.cmake)
 enable_testing()
 

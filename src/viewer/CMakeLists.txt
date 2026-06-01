@@ -15,4 +15,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${NLOHMANN_JSON_INCLUDE_DIR})
 target_link_libraries(${PROJECT_NAME} PUBLIC
-    core OpenGL::GL OpenGL::GLU SDL2::SDL2 spdlog::spdlog)
+    core OpenGL::GL OpenGL::GLU
+    $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
+    SDL2::SDL2
+    spdlog::spdlog)
