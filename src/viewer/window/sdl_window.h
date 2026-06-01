@@ -2,7 +2,9 @@
 #define PCLITE_SDL_WINDOW_H
 
 #include "window.h"
+#include "camera/camera_controller.h"
 #include <SDL2/SDL.h>
+#include <memory>
 #include <string>
 
 class SDLWindow : public Window {
@@ -16,14 +18,10 @@ public:
     // Runs the SDL event loop until the window is closed or Esc is pressed.
     void run();
 
-    // Initial orbit parameters (call before run())
-    void setOrbitDistance(float d) { distance_ = d; }
-    void setOrbitAzimuth(float a)  { azimuth_  = a; }
-    void setOrbitElevation(float e){ elevation_ = e; }
+    // Takes ownership of the controller and syncs its screen size.
+    void setController(std::unique_ptr<CameraController> controller);
 
-    // Reverse-derive orbit state from camera[0]'s current position/target.
-    // Call after addCamera() + any lookAt() so the orbit stays consistent.
-    void syncOrbitFromCamera();
+    void onResize(int w, int h) override;
 
 private:
     SDL_Window*   sdlWindow_ = nullptr;
@@ -31,15 +29,15 @@ private:
     bool          running_   = false;
     std::string   title_;
 
-    float azimuth_    = 45.f;
-    float elevation_  = 30.f;
-    float distance_   = 50.f;
-    bool  dragging_   = false;
-    int   lastMouseX_ = 0;
-    int   lastMouseY_ = 0;
+    std::unique_ptr<CameraController> controller_;
 
-    void updateCameraPosition();
+    // Per-button drag tracking (indexed by SDL button number)
+    bool leftDragging_  = false;
+    bool rightDragging_ = false;
+    int  lastMouseX_    = 0;
+    int  lastMouseY_    = 0;
+
     void handleEvent(const SDL_Event& e);
 };
 
-#endif //PCLITE_SDL_WINDOW_H
+#endif // PCLITE_SDL_WINDOW_H

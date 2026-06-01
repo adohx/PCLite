@@ -6,7 +6,6 @@
 #include <SDL2/SDL_opengl.h>
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <stdexcept>
 
 SDLWindow::SDLWindow(int w, int h, const std::string& title) {
@@ -40,34 +39,14 @@ SDLWindow::~SDLWindow() {
     SDL_Quit();
 }
 
-void SDLWindow::syncOrbitFromCamera() {
-    if (cameras_.empty()) return;
-    auto& cam = *cameras_[0];
-    auto pos = cam.position();
-    auto tgt = cam.target();
-
-    float dx = (float)(pos.x - tgt.x);
-    float dy = (float)(pos.y - tgt.y);
-    float dz = (float)(pos.z - tgt.z);
-
-    distance_  = std::sqrt(dx*dx + dy*dy + dz*dz);
-    elevation_ = std::asin(std::clamp(dy / distance_, -1.f, 1.f)) * 180.f / (float)M_PI;
-    azimuth_   = std::atan2(dx, dz) * 180.f / (float)M_PI;
+void SDLWindow::setController(std::unique_ptr<CameraController> controller) {
+    controller_ = std::move(controller);
+    if (controller_) controller_->onResize(width_, height_);
 }
 
-void SDLWindow::updateCameraPosition() {
-    if (cameras_.empty()) return;
-    auto& cam = *cameras_[0];
-
-    auto tgt = cam.target();
-    float az = azimuth_   * (float)M_PI / 180.f;
-    float el = elevation_ * (float)M_PI / 180.f;
-
-    cam.setPosition({
-        tgt.x + distance_ * std::cos(el) * std::sin(az),
-        tgt.y + distance_ * std::sin(el),
-        tgt.z + distance_ * std::cos(el) * std::cos(az)
-    });
+void SDLWindow::onResize(int w, int h) {
+    Window::onResize(w, h);
+    if (controller_) controller_->onResize(w, h);
 }
 
 void SDLWindow::handleEvent(const SDL_Event& e) {
@@ -83,33 +62,38 @@ void SDLWindow::handleEvent(const SDL_Event& e) {
 
     case SDL_MOUSEBUTTONDOWN:
         if (e.button.button == SDL_BUTTON_LEFT) {
-            dragging_   = true;
-            lastMouseX_ = e.button.x;
-            lastMouseY_ = e.button.y;
+            leftDragging_ = true;
+            lastMouseX_   = e.button.x;
+            lastMouseY_   = e.button.y;
+        }
+        if (e.button.button == SDL_BUTTON_RIGHT) {
+            rightDragging_ = true;
+            lastMouseX_    = e.button.x;
+            lastMouseY_    = e.button.y;
         }
         onMouseButton((float)e.button.x, (float)e.button.y, e.button.button, true);
         break;
 
     case SDL_MOUSEBUTTONUP:
-        if (e.button.button == SDL_BUTTON_LEFT) dragging_ = false;
+        if (e.button.button == SDL_BUTTON_LEFT)  leftDragging_  = false;
+        if (e.button.button == SDL_BUTTON_RIGHT) rightDragging_ = false;
         onMouseButton((float)e.button.x, (float)e.button.y, e.button.button, false);
         break;
 
     case SDL_MOUSEMOTION:
-        if (dragging_) {
+        if ((leftDragging_ || rightDragging_) && controller_) {
             float dx = (float)(e.motion.x - lastMouseX_);
             float dy = (float)(e.motion.y - lastMouseY_);
-            azimuth_   -= dx * 0.4f;
-            elevation_  = std::clamp(elevation_ + dy * 0.4f, -89.f, 89.f);
-            lastMouseX_ = e.motion.x;
-            lastMouseY_ = e.motion.y;
+            if (leftDragging_)  controller_->onMouseDrag(SDL_BUTTON_LEFT,  dx, dy);
+            if (rightDragging_) controller_->onMouseDrag(SDL_BUTTON_RIGHT, dx, dy);
         }
+        lastMouseX_ = e.motion.x;
+        lastMouseY_ = e.motion.y;
         onMouseMove((float)e.motion.x, (float)e.motion.y);
         break;
 
     case SDL_MOUSEWHEEL:
-        distance_ *= (e.wheel.y > 0) ? 0.85f : 1.18f;
-        distance_  = std::clamp(distance_, 0.5f, 5000.f);
+        if (controller_) controller_->onScroll((float)e.wheel.y);
         onMouseScroll((float)e.wheel.y);
         break;
 
@@ -128,7 +112,7 @@ void SDLWindow::render() {
     auto& cam = *cameras_[0];
 
     glMatrixMode(GL_PROJECTION);
-    auto proj = cam.projectionMatrix().data();  // column-major for OpenGL
+    auto proj = cam.projectionMatrix().data();
     glLoadMatrixf(proj.data());
     glMatrixMode(GL_MODELVIEW);
     Mat4f viewMatrix = cam.viewMatrix();
@@ -152,7 +136,9 @@ void SDLWindow::run() {
         while (SDL_PollEvent(&e))
             handleEvent(e);
 
-        updateCameraPosition();
+        if (controller_ && !cameras_.empty())
+            controller_->applyToCamera(*cameras_[0]);
+
         render();
         SDL_GL_SwapWindow(sdlWindow_);
 

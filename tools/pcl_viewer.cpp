@@ -6,7 +6,8 @@
 #include <memory>
 
 #include "window/sdl_window.h"
-#include "camera/orbit_camera.h"
+#include "camera/perspective_camera.h"
+#include "camera/orbit_controller.h"
 #include "layer/point_cloud_layer.h"
 #include "node_management/sse_lru_strategy.h"
 #include "node_loader/point_cloud_loader.h"
@@ -52,16 +53,19 @@ int main(int argc, char** argv) {
         (bbMin.y + bbMax.y) * 0.5,
         (bbMin.z + bbMax.z) * 0.5,
     };
-    auto camera = std::make_unique<OrbitCamera>();
+    auto camera = std::make_unique<PerspectiveCamera>();
     camera->setTarget(center);
     camera->setNearPlane(span * 0.001f);
     camera->setFarPlane(span * 10.f);
     camera->lookAt(bb);
 
+    auto controller = std::make_unique<OrbitController>();
+    controller->syncFromCamera(*camera);
+
     SDLWindow window(800, 600, "PCLite Viewer");
-    window.addCamera(std::move(camera));
     window.addLayer(std::move(layer));
-    window.syncOrbitFromCamera();
+    window.addCamera(std::move(camera));
+    window.setController(std::move(controller));
     window.run();
 
     return 0;

@@ -19,11 +19,6 @@ public:
     virtual Mat4f viewMatrix()       const = 0;
     virtual Mat4f projectionMatrix() const = 0;
 
-    // Camera manipulation — subclasses define the concrete behaviour.
-    virtual void rotate(vec3d axis, float angleDeg) = 0;
-    virtual void translate(vec3d delta)             = 0;
-    virtual void zoom(float factor)                 = 0;
-
     // Point the camera at a target point or the centre of a bounding box.
     void lookAt(vec3d point);
     void lookAt(const BoundingBoxd& bbox);
