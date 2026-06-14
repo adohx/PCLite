@@ -1,20 +1,13 @@
 #include "all_nodes_strategy.h"
 #include "../../core/node.h"
 
-std::vector<Node*> AllNodesStrategy::computeNodesToLoad(
+std::vector<Node*> AllNodesStrategy::evaluate(
     const Camera&,
     const std::vector<std::shared_ptr<Node>>& nodes)
 {
-    std::vector<Node*> toLoad;
+    std::vector<Node*> active;
     for (auto& n : nodes)
-        if (!n->isLoaded() && n->type_ != NodeType::Proxy)
-            toLoad.push_back(n.get());
-    return toLoad;
-}
-
-std::vector<Node*> AllNodesStrategy::computeNodesToCull(
-    const Camera&,
-    const std::vector<std::shared_ptr<Node>>&)
-{
-    return {};
+        if (n->type_ != NodeType::Proxy)
+            active.push_back(n.get());
+    return active;
 }

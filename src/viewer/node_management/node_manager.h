@@ -4,7 +4,7 @@
 #include <memory>
 #include "mat.h"
 
-class Node;
+struct Node;
 class Camera;
 class ManageStrategy;
 class Painter;

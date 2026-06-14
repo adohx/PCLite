@@ -11,12 +11,12 @@ function(collect_sources out_var dir)
     cmake_parse_arguments(ARG "RECURSE" "" "" ${ARGN})
 
     if(ARG_RECURSE)
-        file(GLOB_RECURSE _sources
+        file(GLOB_RECURSE _sources CONFIGURE_DEPENDS
             "${dir}/*.cpp"
             "${dir}/*.h"
         )
     else()
-        file(GLOB _sources
+        file(GLOB _sources CONFIGURE_DEPENDS
             "${dir}/*.cpp"
             "${dir}/*.h"
         )
