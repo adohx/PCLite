@@ -11,7 +11,10 @@ add_executable(${EXECUTABLE_NAME}
 
 target_link_libraries(${EXECUTABLE_NAME}
         GTest::gtest_main
+        converter
 )
+target_compile_definitions(${EXECUTABLE_NAME} PRIVATE
+        TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test_data")
 
 include(GoogleTest)
 gtest_discover_tests(${EXECUTABLE_NAME})

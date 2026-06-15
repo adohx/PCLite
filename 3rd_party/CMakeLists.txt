@@ -25,3 +25,20 @@ FetchContent_Declare(
 set(SPDLOG_BUILD_EXAMPLES OFF CACHE INTERNAL "")
 set(SPDLOG_BUILD_TESTS    OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(spdlog)
+
+# ── LASzip ────────────────────────────────────────────────────────────────────
+FetchContent_Declare(
+    laszip
+    GIT_REPOSITORY https://github.com/LASzip/LASzip.git
+    GIT_TAG        3.4.4
+    GIT_SHALLOW    TRUE
+)
+set(LASZIP_BUILD_STATIC ON CACHE INTERNAL "")
+FetchContent_MakeAvailable(laszip)
+
+# laszip's targets don't export their include dirs; expose the dll/ headers
+# (laszip_api.h: laszip_header_struct / laszip_point_struct / laszip_* API,
+# implemented directly by the `laszip` library target, no dlopen involved)
+set(LASZIP_INCLUDE_DIR
+    "${laszip_SOURCE_DIR}/dll"
+    CACHE PATH "LASzip C API include directory" FORCE)

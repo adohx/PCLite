@@ -4,305 +4,413 @@
 
 #include "chunker.h"
 
-#include "attribute_reader.h"
-#include "chunker.h"
-
-#include <atomic>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <limits>
+#include <unordered_map>
 
-#include "boundary_box.h"
-#include "../../utilities/pclite_thread_pool.h"
+#include <nlohmann/json.hpp>
+
+#include "attribute_handler/attribute_handler.h"
+#include "attribute_handler/attribute_handler_registry.h"
+#include "attribute_handler/classification_attribute_handler.h"
 #include "attribute_reader/attribute_reader.h"
+#include "concurrent_writer.h"
+#include "octree_naming.h"
 
-class Chunker::ChunkPrivate {
-public:
-    struct Parameters {
-        uint32_t gridSize_;
-        uint64_t maxPointsPerChunk_;
-        vec3d min_;
-        vec3d max_;
-    };
+namespace {
 
-public:
-    ChunkPrivate(Chunker *parent) {
-        parent_ = parent;
-        for (auto &source: parent->sources_) {
-            readers_.emplace_back();
+constexpr double kInf = std::numeric_limits<double>::infinity();
+
+uint64_t flattenIndex(uint64_t x, uint64_t y, uint64_t z, uint64_t size) {
+    return x + y * size + z * size * size;
+}
+
+std::string attributeTypeName(AttributeType type) {
+    switch (type) {
+        case AttributeType::INT8:   return "int8";
+        case AttributeType::INT16:  return "int16";
+        case AttributeType::INT32:  return "int32";
+        case AttributeType::INT64:  return "int64";
+        case AttributeType::UINT8:  return "uint8";
+        case AttributeType::UINT16: return "uint16";
+        case AttributeType::UINT32: return "uint32";
+        case AttributeType::UINT64: return "uint64";
+        case AttributeType::FLOAT:  return "float";
+        case AttributeType::DOUBLE: return "double";
+        default: return "undefined";
+    }
+}
+
+nlohmann::json vecToJson(const vec3d &v, int numElements) {
+    nlohmann::json arr = nlohmann::json::array();
+    if (numElements >= 1) arr.push_back(v.x);
+    if (numElements >= 2) arr.push_back(v.y);
+    if (numElements >= 3) arr.push_back(v.z);
+    return arr;
+}
+
+nlohmann::json attributeToJson(const Attribute &attr) {
+    nlohmann::json j;
+    j["name"] = attr.name_;
+    j["description"] = attr.description_;
+    j["size"] = attr.bytes_;
+    j["numElements"] = attr.numElements_;
+    j["elementSize"] = attr.numElements_ > 0 ? attr.bytes_ / attr.numElements_ : attr.bytes_;
+    j["type"] = attributeTypeName(attr.type_);
+
+    if (dynamic_cast<ClassificationAttributeHandler *>(AttributeHandlerRegistry::get(attr)) != nullptr) {
+        j["histogram"] = attr.histogram_;
+    }
+
+    j["min"] = vecToJson(attr.min_, attr.numElements_);
+    j["max"] = vecToJson(attr.max_, attr.numElements_);
+    j["scale"] = vecToJson(attr.scale_, attr.numElements_);
+    j["offset"] = vecToJson(attr.offset_, attr.numElements_);
+    return j;
+}
+
+} // namespace
+
+Chunker::Chunker(std::vector<std::shared_ptr<AttributeReader>> readers,
+                 Attributes attributes,
+                 std::string targetDir,
+                 std::shared_ptr<ConcurrentWriter> writer,
+                 ConverterOptions options)
+    : readers_(std::move(readers)),
+      attributes_(std::move(attributes)),
+      targetDir_(std::move(targetDir)),
+      writer_(std::move(writer)),
+      options_(std::move(options)) {}
+
+bool Chunker::run() {
+    aabb_ = computeAABB();
+    if (!aabb_.isValid()) return false;
+
+    // Rebase position offset to the dataset origin so on-disk coordinates are
+    // small integers (matches the 2.1 metadata.json reference layout).
+    for (auto &attr : attributes_) {
+        if (attr.name_ == "position") {
+            attr.offset_ = aabb_.min();
         }
     }
 
-    ~ChunkPrivate() {
-        parent_ = nullptr;
+    uint64_t totalPoints = 0;
+    for (auto &reader : readers_) {
+        auto info = reader->headerInfo();
+        totalPoints += std::max<uint64_t>(info.numPoints_, info.extendedNumPoints_);
     }
 
-    uint32_t calculateGridSize() {
-        uint32_t gridSize = 128;
+    gridSize_ = calculateGridSize(totalPoints);
 
-        uint64_t totalPoints = 0;
-        for (const auto &reader: readers_) {
-            totalPoints += reader->headerInfo().numPoints_;
-        }
-
-        const auto tmp = totalPoints / 20;
-        maxPointsPerChunk_ = std::min(tmp, static_cast<uint64_t>(10'000'000));
-
-        if (totalPoints < 100'000'000) {
-            gridSize = 128;
-        } else if (totalPoints < 500'000'000) {
-            gridSize = 256;
-        } else {
-            gridSize = 512;
-        }
-        return gridSize;
+    uint64_t maxPointsPerChunk = options_.maxPointsPerChunk;
+    if (maxPointsPerChunk == 0) {
+        maxPointsPerChunk = std::min<uint64_t>(totalPoints / 20, 10'000'000);
     }
 
-    [[nodiscard]] std::vector<std::atomic_int32_t> countPointsInCells(uint32_t gridSize, BoundingBoxd bb) const {
-        std::vector<std::atomic_int32_t> grid(gridSize * gridSize * gridSize);
-        auto countTask = [this,gridSize, &grid,bb](const std::unique_ptr<AttributeReader> &reader,
-                                                   const uint64_t offset, int64_t numToRead) {
-            const auto poses = reader->readPositions(offset, numToRead);
-            const auto attributes = reader->getAttributes();
-            for (auto &pos: poses) {
-                const auto idx = coordinate2Index(pos, attributes);
+    std::vector<int64_t> grid = countPointsInCells(gridSize_);
+
+    std::vector<int32_t> lut;
+    buildChunksAndLut(grid, gridSize_, maxPointsPerChunk, chunks_, lut);
+
+    if (!distributePoints(lut, gridSize_)) return false;
+
+    return writeMetadata();
+}
+
+BoundingBoxd Chunker::computeAABB() const {
+    if (readers_.empty()) return BoundingBoxd();
+
+    vec3d lo{kInf, kInf, kInf};
+    vec3d hi{-kInf, -kInf, -kInf};
+
+    for (auto &reader : readers_) {
+        auto info = reader->headerInfo();
+        lo.x = std::min(lo.x, info.min_.x);
+        lo.y = std::min(lo.y, info.min_.y);
+        lo.z = std::min(lo.z, info.min_.z);
+        hi.x = std::max(hi.x, info.max_.x);
+        hi.y = std::max(hi.y, info.max_.y);
+        hi.z = std::max(hi.z, info.max_.z);
+    }
+
+    double maxSide = std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+    vec3d cubeMax{lo.x + maxSide, lo.y + maxSide, lo.z + maxSide};
+
+    return BoundingBoxd(lo, cubeMax);
+}
+
+uint32_t Chunker::calculateGridSize(uint64_t totalPoints) const {
+    uint32_t gridSize;
+    if (totalPoints < 100'000'000ull) gridSize = 128;
+    else if (totalPoints < 500'000'000ull) gridSize = 256;
+    else gridSize = 512;
+
+    return std::max(gridSize, options_.minGridSize);
+}
+
+std::vector<int64_t> Chunker::countPointsInCells(uint32_t gridSize) const {
+    uint64_t numCells = static_cast<uint64_t>(gridSize) * gridSize * gridSize;
+    std::vector<int64_t> grid(numCells, 0);
+
+    constexpr int64_t kBatchSize = 1'000'000;
+
+    for (auto &reader : readers_) {
+        auto info = reader->headerInfo();
+        uint64_t total = std::max<uint64_t>(info.numPoints_, info.extendedNumPoints_);
+
+        for (uint64_t start = 0; start < total; start += kBatchSize) {
+            int64_t count = static_cast<int64_t>(std::min<uint64_t>(kBatchSize, total - start));
+            std::vector<vec3d> positions = reader->readPositions(start, count);
+
+            for (const vec3d &p : positions) {
+                uint64_t idx = octree_naming::cellIndex(p, aabb_, gridSize);
                 ++grid[idx];
             }
-        };
-
-        PCLiteThreadPool pool(std::max(std::thread::hardware_concurrency(), static_cast<uint>(4)));
-        auto batchSize = 1'000'000;
-        for (const auto &reader: readers_) {
-            auto bpp = reader->headerInfo().bpp_;
-            auto numPoints = std::max(reader->headerInfo().numPoints_,
-                                      reader->headerInfo().extendedNumPoints_);
-
-            auto pointsLeft = numPoints;
-            auto numRead = 0;
-
-            while (pointsLeft > 0) {
-                int64_t numToRead;
-                if (pointsLeft < batchSize) {
-                    numToRead = pointsLeft;
-                    pointsLeft = 0;
-                } else {
-                    numToRead = batchSize;
-                    pointsLeft = pointsLeft - batchSize;
-                }
-
-                pool.enqueue(countTask, reader, numRead, numToRead);
-                numRead += batchSize;
-            }
         }
-        pool.waitAll();
-        return grid;
     }
 
-    Chunker::NodeLut createNodeLut(const std::vector<std::atomic_int32_t> &grid, uint gridSize,uint64_t maxPointsPerChunk) {
-        auto iterateXYZ = [](const int64_t gz, const std::function<void(int64_t, int64_t, int64_t)>& callback) {
-            for (int x = 0; x < gz; x++) {
-                for (int y = 0; y < gz; y++) {
-                    for (int z = 0; z < gz; z++) {
-                        callback(x, y, z);
-                    }
-                }
-            }
-        };
+    return grid;
+}
 
-        std::vector<int64_t> grid_high;
-        grid_high.reserve(grid.size());
-        for (auto &value: grid) {
-            grid_high.emplace_back(value);
-        }
+void Chunker::buildChunksAndLut(const std::vector<int64_t> &grid, uint32_t gridSize,
+                                 uint64_t maxPointsPerChunk,
+                                 std::vector<ChunkInfo> &outChunks,
+                                 std::vector<int32_t> &outLut) const {
+    outChunks.clear();
 
-        auto level_max = int64_t(std::log2(gridSize));
+    int levelMax = static_cast<int>(std::round(std::log2(static_cast<double>(gridSize))));
 
-        for (int64_t level_low = level_max - 1; level_low >= 0; level_low--) {
-            int64_t level_high = level_low + 1;
+    vec3d aabbMin = aabb_.min();
+    double aabbEdge = aabb_.getSize().x;
 
-            int64_t gridSize_high = pow(2, level_high);
-            int64_t gridSize_low = pow(2, level_low);
+    auto pushChunk = [&](int level, uint32_t x, uint32_t y, uint32_t z) {
+        ChunkInfo info;
+        info.level = level;
+        info.x = x;
+        info.y = y;
+        info.z = z;
+        info.size = 1u << (levelMax - level);
+        info.numPoints = 0;
+        info.name = octree_naming::toNodeID(level, 1u << level, x, y, z);
 
-            std::vector<int64_t> grid_low(gridSize_low * gridSize_low * gridSize_low, 0);
-            // grid_high
+        double cellSize = aabbEdge / static_cast<double>(1u << level);
+        vec3d cmin{aabbMin.x + x * cellSize, aabbMin.y + y * cellSize, aabbMin.z + z * cellSize};
+        vec3d cmax{cmin.x + cellSize, cmin.y + cellSize, cmin.z + cellSize};
+        info.bb = BoundingBoxd(cmin, cmax);
 
-            // loop through all cells of the lower detail target grid, and for each cell through the 8 enclosed cells of the higher level grid
-            iterateXYZ(
-                gridSize_low, [&grid_low, &grid_high, gridSize_low, gridSize_high, level_low, level_high, level_max]
-        (int64_t x, int64_t y, int64_t z) {
-                    int64_t index_low = x + y * gridSize_low + z * gridSize_low * gridSize_low;
+        outChunks.push_back(std::move(info));
+    };
+
+    std::vector<int64_t> gridHigh = grid;
+
+    for (int levelLow = levelMax - 1; levelLow >= 0; --levelLow) {
+        int levelHigh = levelLow + 1;
+        uint32_t sizeLow = 1u << levelLow;
+        uint32_t sizeHigh = 1u << levelHigh;
+
+        std::vector<int64_t> gridLow(static_cast<size_t>(sizeLow) * sizeLow * sizeLow, 0);
+
+        for (uint32_t z = 0; z < sizeLow; ++z) {
+            for (uint32_t y = 0; y < sizeLow; ++y) {
+                for (uint32_t x = 0; x < sizeLow; ++x) {
+                    uint64_t idxLow = flattenIndex(x, y, z, sizeLow);
+                    std::array<uint64_t, 8> children = octree_naming::subdividedIndices(x, y, z, sizeLow);
 
                     int64_t sum = 0;
-                    int64_t max = 0;
-                    bool unmergeable = false;
-                    auto indices = subdividedIndices(x,y,z,gridSize_low);
-                      for (auto &index: indices) {
-                          auto value = grid_high[index];
+                    bool finalized = false;
+                    for (uint64_t c : children) {
+                        int64_t v = gridHigh[c];
+                        if (v == -1) finalized = true;
+                        else sum += v;
+                    }
 
-                        if (value == -1) {
-                            unmergeable = true;
-                        } else {
-                            sum += value;
-                        }
-
-                        max = std::max(max, value);
-                      }
-
-                    if (unmergeable || sum > maxPointsPerChunk) {
-                        // finished chunks
-                        auto indices = subdividedIndices(x,y,z,gridSize_low);
-                        for (auto &index: indices) {
-                            auto value = grid_high[index];
-
-                            if (value > 0) {
-                                std::string nodeID = toNodeID(level_high, gridSize_high, nx, ny, nz);
-
-                                Node node(nodeID, value);
-                                node.x = nx;
-                                node.y = ny;
-                                node.z = nz;
-                                node.size = pow(2, (level_max - level_high));
-
-                                nodes.push_back(node);
+                    if (finalized || sum > static_cast<int64_t>(maxPointsPerChunk)) {
+                        for (uint64_t c : children) {
+                            int64_t v = gridHigh[c];
+                            if (v > 0) {
+                                uint64_t cx = c % sizeHigh;
+                                uint64_t cy = (c / sizeHigh) % sizeHigh;
+                                uint64_t cz = c / (static_cast<uint64_t>(sizeHigh) * sizeHigh);
+                                pushChunk(levelHigh, static_cast<uint32_t>(cx),
+                                          static_cast<uint32_t>(cy), static_cast<uint32_t>(cz));
                             }
                         }
-
-                        // invalidate the field to show the parent that nothing can be merged with it
-                        grid_low[index_low] = -1;
+                        gridLow[idxLow] = -1;
                     } else {
-                        grid_low[index_low] = sum;
+                        gridLow[idxLow] = sum;
                     }
-                });
-
-            grid_high = grid_low;
-        }
-
-        // - create lookup table
-        // - loop through nodes, add pointers to node/chunk for all enclosed cells in LUT.
-        vector<int32_t> lut(gridSize * gridSize * gridSize, -1);
-        for (int i = 0; i < nodes.size(); i++) {
-            auto node = nodes[i];
-
-            iterateXYZ(node.size, [node, &lut, gridSize, i](int64_t ox, int64_t oy, int64_t oz) {
-                int64_t x = node.size * node.x + ox;
-                int64_t y = node.size * node.y + oy;
-                int64_t z = node.size * node.z + oz;
-                int64_t index = x + y * gridSize + z * gridSize * gridSize;
-
-                lut[index] = i;
-            });
-        }
-
-        return {gridSize, lut};
-    }
-
-    std::string toNodeID(int level, int gridSize, int64_t x, int64_t y, int64_t z) {
-
-        std::string id = "r";
-
-        int currentGridSize = gridSize;
-        int lx = x;
-        int ly = y;
-        int lz = z;
-
-        for (int i = 0; i < level; i++) {
-
-            int index = 0;
-
-            if (lx >= currentGridSize / 2) {
-                index = index + 0b100;
-                lx = lx - currentGridSize / 2;
+                }
             }
-
-            if (ly >= currentGridSize / 2) {
-                index = index + 0b010;
-                ly = ly - currentGridSize / 2;
-            }
-
-            if (lz >= currentGridSize / 2) {
-                index = index + 0b001;
-                lz = lz - currentGridSize / 2;
-            }
-
-            id = id + std::to_string(index);
-            currentGridSize = currentGridSize / 2;
         }
 
-        return id;
+        gridHigh = std::move(gridLow);
     }
 
-    static uint64_t coordinate2Index(const vec3d &pos, const Attributes &attributes) {
-        // transfer las integer coordinates to new scale/offset/box values
-        const auto x = pos.x;
-        const auto y = pos.y;
-        const auto z = pos.z;
-        const auto posOffset = attributes.posOffset_;
-        const auto posScale = attributes.posScale_;
-
-        int32_t X = static_cast<int32_t>((x - posOffset.x) / posScale.x);
-        int32_t Y = int32_t((y - posOffset.y) / posScale.y);
-        int32_t Z = int32_t((z - posOffset.z) / posScale.z);
-
-        double ux = (double(X) * posScale.x + posOffset.x - min.x) / size.x;
-        double uy = (double(Y) * posScale.y + posOffset.y - min.y) / size.y;
-        double uz = (double(Z) * posScale.z + posOffset.z - min.z) / size.z;
-
-        bool inBox = ux >= 0.0 && uy >= 0.0 && uz >= 0.0;
-        inBox = inBox && ux <= 1.0 && uy <= 1.0 && uz <= 1.0;
-
-        uint64_t ix = uint64_t(std::min(dGridSize * ux, dGridSize - 1.0));
-        uint64_t iy = uint64_t(std::min(dGridSize * uy, dGridSize - 1.0));
-        uint64_t iz = uint64_t(std::min(dGridSize * uz, dGridSize - 1.0));
-
-        uint64_t index = ix + iy * gridSize + iz * gridSize * gridSize;
-
-        return index;
+    if (gridHigh[0] > 0) {
+        pushChunk(0, 0, 0, 0);
     }
 
-    bool distributePoints(const Attributes &attributes) {
-    }
-
-    static std::vector<uint64_t> subdividedIndices(uint64_t x,uint64_t y,uint64_t z, uint64_t gridSize) {
-        std::vector<uint64_t> indices(8,-1);
-        for (int64_t j = 0; j < 8; j++) {
-            int64_t ox = (j & 0b100) >> 2;
-            int64_t oy = (j & 0b010) >> 1;
-            int64_t oz = (j & 0b001) >> 0;
-
-            int64_t nx = 2 * x + ox;
-            int64_t ny = 2 * y + oy;
-            int64_t nz = 2 * z + oz;
-
-            indices[j]= nx + ny * gridSize + nz * gridSize * gridSize;
+    outLut.assign(static_cast<size_t>(gridSize) * gridSize * gridSize, -1);
+    for (size_t i = 0; i < outChunks.size(); ++i) {
+        const ChunkInfo &chunk = outChunks[i];
+        for (uint32_t oz = 0; oz < chunk.size; ++oz) {
+            for (uint32_t oy = 0; oy < chunk.size; ++oy) {
+                for (uint32_t ox = 0; ox < chunk.size; ++ox) {
+                    uint32_t x = chunk.size * chunk.x + ox;
+                    uint32_t y = chunk.size * chunk.y + oy;
+                    uint32_t z = chunk.size * chunk.z + oz;
+                    outLut[flattenIndex(x, y, z, gridSize)] = static_cast<int32_t>(i);
+                }
+            }
         }
-
-        return indices;
     }
-
-private:
-    friend class Chunker;
-    Chunker *parent_;
-
-    std::vector<std::unique_ptr<AttributeReader> > readers_;
-    uint64_t maxPointsPerChunk_{0};
-};
-
-Chunker::Chunker(const std::vector<std::string> &sources, const std::string &target)
-    : sources_(sources), target_(target) {
-    d_ = std::make_unique<ChunkPrivate>(this);
 }
 
-Chunker::~Chunker() {
-    d_ = nullptr;
+bool Chunker::distributePoints(const std::vector<int32_t> &lut, uint32_t gridSize) {
+    for (auto &attr : attributes_) {
+        attr.min_ = {kInf, kInf, kInf};
+        attr.max_ = {-kInf, -kInf, -kInf};
+    }
+
+    uint64_t dstRowBytes = attributes_.getTotalBytes();
+    constexpr int64_t kBatchSize = 1'000'000;
+
+    struct AttributePlan {
+        Attribute srcAttr;
+        uint64_t srcOffset;
+        uint64_t dstOffset;
+        AttributeHandler *handler;
+        Attribute *dstAttr;
+    };
+
+    for (auto &reader : readers_) {
+        Attributes srcAttrs = reader->getAttributes();
+        uint64_t srcRowBytes = srcAttrs.getTotalBytes();
+
+        Attribute srcPosAttr = srcAttrs.getAttribute("position");
+        uint64_t srcPosOffset = srcAttrs.getOffset("position");
+        AttributeHandler *posHandler = AttributeHandlerRegistry::get(srcPosAttr);
+
+        std::vector<AttributePlan> plans;
+        plans.reserve(attributes_.size());
+        for (auto &dstAttr : attributes_) {
+            AttributePlan plan;
+            plan.srcAttr = srcAttrs.getAttribute(dstAttr.name_);
+            plan.srcOffset = srcAttrs.getOffset(dstAttr.name_);
+            plan.dstOffset = attributes_.getOffset(dstAttr.name_);
+            plan.handler = AttributeHandlerRegistry::get(dstAttr);
+            plan.dstAttr = &dstAttr;
+            plans.push_back(plan);
+        }
+
+        auto info = reader->headerInfo();
+        uint64_t total = std::max<uint64_t>(info.numPoints_, info.extendedNumPoints_);
+
+        for (uint64_t start = 0; start < total; start += kBatchSize) {
+            int64_t count = static_cast<int64_t>(std::min<uint64_t>(kBatchSize, total - start));
+            std::vector<uint8_t> rawRows = reader->readRawData(start, count);
+
+            std::vector<uint8_t> dstBuf(static_cast<size_t>(count) * dstRowBytes);
+            std::vector<int32_t> chunkIdx(static_cast<size_t>(count));
+
+            for (int64_t i = 0; i < count; ++i) {
+                const uint8_t *srcRow = rawRows.data() + static_cast<uint64_t>(i) * srcRowBytes;
+                uint8_t *dstRow = dstBuf.data() + static_cast<uint64_t>(i) * dstRowBytes;
+
+                double pos[3];
+                posHandler->decode(srcRow + srcPosOffset, srcPosAttr, pos);
+                vec3d p{pos[0], pos[1], pos[2]};
+
+                uint64_t cell = octree_naming::cellIndex(p, aabb_, gridSize);
+                chunkIdx[i] = lut[cell];
+
+                for (auto &plan : plans) {
+                    plan.handler->encode(dstRow + plan.dstOffset, srcRow + plan.srcOffset,
+                                          plan.srcAttr, *plan.dstAttr);
+                }
+            }
+
+            for (auto &plan : plans) {
+                plan.handler->updateStats(*plan.dstAttr, dstBuf.data() + plan.dstOffset,
+                                           static_cast<uint64_t>(count), dstRowBytes);
+            }
+
+            std::unordered_map<int32_t, std::vector<uint8_t>> perChunk;
+            for (int64_t i = 0; i < count; ++i) {
+                int32_t idx = chunkIdx[i];
+                const uint8_t *row = dstBuf.data() + static_cast<uint64_t>(i) * dstRowBytes;
+                std::vector<uint8_t> &buf = perChunk[idx];
+                buf.insert(buf.end(), row, row + dstRowBytes);
+                chunks_[idx].numPoints += 1;
+            }
+
+            for (auto &[idx, buf] : perChunk) {
+                writer_->append("chunks/" + chunks_[idx].name + ".bin", buf);
+            }
+        }
+    }
+
+    return true;
 }
 
-bool Chunker::doChunking() {
-    //1. calculate the grid size
-    auto gridSize = d_->calculateGridSize();
-    //2. count the point number in the cells
-    auto grid = d_->countPointsInCells();
-    //3. create a look up table
-    auto nodeLut = d_->createNodeLut();
-    //4. distribute points
-    auto res = distributePoints();
-    return res;
+bool Chunker::writeMetadata() const {
+    nlohmann::json j;
+
+    j["version"] = "2.0";
+
+    std::string name = "pointcloud";
+    if (!readers_.empty()) {
+        name = std::filesystem::path(readers_[0]->headerInfo().name_).stem().string();
+    }
+    j["name"] = name;
+    j["description"] = "";
+
+    uint64_t totalPoints = 0;
+    for (const ChunkInfo &chunk : chunks_) totalPoints += chunk.numPoints;
+    j["points"] = totalPoints;
+
+    j["projection"] = "";
+
+    vec3d aMin = aabb_.min();
+    vec3d aMax = aabb_.max();
+    j["offset"] = {aMin.x, aMin.y, aMin.z};
+
+    vec3d posScale{1, 1, 1};
+    for (const Attribute &attr : attributes_) {
+        if (attr.name_ == "position") posScale = attr.scale_;
+    }
+    j["scale"] = {posScale.x, posScale.y, posScale.z};
+
+    j["spacing"] = aabb_.getSize().x / static_cast<double>(gridSize_);
+
+    j["boundingBox"] = {
+        {"min", {aMin.x, aMin.y, aMin.z}},
+        {"max", {aMax.x, aMax.y, aMax.z}},
+    };
+
+    j["encoding"] = "DEFAULT";
+
+    j["hierarchy"] = {
+        {"firstChunkSize", options_.firstChunkSize},
+        {"stepSize", options_.stepSize},
+        {"depth", 0},
+    };
+
+    nlohmann::json attrsJson = nlohmann::json::array();
+    for (const Attribute &attr : attributes_) {
+        attrsJson.push_back(attributeToJson(attr));
+    }
+    j["attributes"] = attrsJson;
+
+    std::error_code ec;
+    std::filesystem::create_directories(targetDir_, ec);
+
+    std::ofstream out(std::filesystem::path(targetDir_) / "metadata.json", std::ios::binary);
+    if (!out) return false;
+    out << j.dump(4);
+    return static_cast<bool>(out);
 }

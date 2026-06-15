@@ -17,7 +17,7 @@ add_subdirectory(3rd_party)
 
 add_subdirectory(src/utilities)
 add_subdirectory(src/core)
-#add_subdirectory(src/converter)
+add_subdirectory(src/converter)
 add_subdirectory(src/viewer)
 
 add_executable(${PROJECT_NAME} main.cpp)

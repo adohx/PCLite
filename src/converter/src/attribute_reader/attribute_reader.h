@@ -37,6 +37,11 @@ public:
     virtual HeaderInfo headerInfo() = 0;
     virtual vec3d readPosition(uint64_t index) = 0;
     virtual std::vector<vec3d> readPositions(uint64_t index,int64_t counts) = 0;
+
+    // Returns [index, index+count) point rows, packed back-to-back according
+    // to the layout described by getAttributes() (row stride = getAttributes().getTotalBytes()).
+    virtual std::vector<uint8_t> readRawData(uint64_t index, int64_t count) = 0;
+
     virtual ReaderType getType() = 0;
 
 public:
