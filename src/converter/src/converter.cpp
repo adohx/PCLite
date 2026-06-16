@@ -10,8 +10,6 @@
 #include <set>
 #include <thread>
 
-#include <nlohmann/json.hpp>
-
 #include "attribute_reader/attribute_reader.h"
 #include "concurrent_writer.h"
 #include "pclite_thread_pool.h"
@@ -33,6 +31,7 @@ bool Converter::run() {
     if (!buildHierarchy()) return false;
     if (!doSampling()) return false;
     if (!doMerging()) return false;
+    if (!doRebuildIndex()) return false;
 
     writer_->flushAll();
     return true;
@@ -80,8 +79,10 @@ bool Converter::buildHierarchy() {
 bool Converter::doSampling() {
     double rootSpacing = chunker_->aabb().getSize().x / static_cast<double>(chunker_->gridSize());
 
-    indexer_ = std::make_unique<Indexer>(attributes_, target_, writer_, createSampler(options_.sampling),
-                                          options_, rootSpacing);
+    indexer_ = std::make_unique<Indexer>(
+        attributes_, target_, writer_,
+        createSampler(options_.sampling, writer_, target_, attributes_, options_),
+        options_, rootSpacing);
 
     size_t numThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
     PCLiteThreadPool pool(numThreads);
@@ -89,7 +90,8 @@ bool Converter::doSampling() {
     std::vector<std::future<bool>> futures;
     futures.reserve(chunks_.size());
     for (size_t i = 0; i < chunks_.size(); ++i) {
-        futures.push_back(pool.enqueue([this, i]() { return indexer_->indexChunk(chunkRoots_[i], chunks_[i]); }));
+        futures.push_back(
+            pool.enqueue([this, i]() { return indexer_->indexChunk(chunkRoots_[i], chunks_[i]); }));
     }
 
     bool ok = true;
@@ -98,25 +100,9 @@ bool Converter::doSampling() {
 }
 
 bool Converter::doMerging() {
-    if (!indexer_->mergeChunks(hierarchyRoot_, chunks_)) return false;
-    return updateMetadataHierarchy(indexer_->maxLevel(), indexer_->hierarchyByteSize());
+    return indexer_->mergeChunks(hierarchyRoot_, chunks_);
 }
 
-bool Converter::updateMetadataHierarchy(int depth, uint64_t hierarchyByteSize) const {
-    std::filesystem::path metaPath = std::filesystem::path(target_) / "metadata.json";
-
-    std::ifstream in(metaPath);
-    if (!in) return false;
-
-    nlohmann::json j;
-    in >> j;
-    in.close();
-
-    j["hierarchy"]["depth"] = depth;
-    j["hierarchy"]["firstChunkSize"] = hierarchyByteSize;
-
-    std::ofstream out(metaPath, std::ios::binary);
-    if (!out) return false;
-    out << j.dump(4);
-    return static_cast<bool>(out);
+bool Converter::doRebuildIndex() {
+    return indexer_->rebuildIndex();
 }

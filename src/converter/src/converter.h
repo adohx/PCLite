@@ -49,13 +49,12 @@ private:
     // 3. Runs Indexer::indexChunk() for every chunk (in parallel).
     bool doSampling();
 
-    // 4. Runs Indexer::mergeChunks() for the skeleton tree, then rewrites
-    // metadata.json's "hierarchy.depth"/"hierarchy.firstChunkSize" fields.
+    // 4. Runs Indexer::mergeChunks() for the skeleton tree.
     bool doMerging();
 
-    // Rewrites metadata.json's "hierarchy" object with the depth and
-    // hierarchy.bin byte size computed by Indexer::mergeChunks().
-    bool updateMetadataHierarchy(int depth, uint64_t hierarchyByteSize) const;
+    // 5. Runs Indexer::rebuildIndex(): assembles hierarchy.bin from per-chunk
+    // header files and removes the temporary chunks/ directory.
+    bool doRebuildIndex();
 
 private:
     std::vector<std::string> sources_;

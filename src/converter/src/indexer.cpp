@@ -4,119 +4,141 @@
 
 #include "indexer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <numeric>
+#include <unordered_set>
 
+#include <nlohmann/json.hpp>
+
+#include "attribute_handler/attribute_handler.h"
 #include "attribute_handler/attribute_handler_registry.h"
 #include "concurrent_writer.h"
 #include "octree_naming.h"
 
-namespace {
+static constexpr int kMaxLocalDepth = 10;
 
-constexpr size_t kHierarchyRecordBytes = 22;
+// ── Constructor ───────────────────────────────────────────────────────────────
 
-void appendRecord(std::vector<uint8_t> &out, const std::shared_ptr<Node> &node) {
-    size_t base = out.size();
-    out.resize(base + kHierarchyRecordBytes);
-
-    uint8_t type = static_cast<uint8_t>(node->type_);
-    out[base + 0] = type;
-    out[base + 1] = node->childMask_;
-    std::memcpy(out.data() + base + 2, &node->numPoints_, 4);
-    std::memcpy(out.data() + base + 6, &node->address_, 8);
-    std::memcpy(out.data() + base + 14, &node->byteSize_, 8);
-}
-
-} // namespace
-
-Indexer::Indexer(Attributes attributes, std::string targetDir, std::shared_ptr<ConcurrentWriter> writer,
-                  std::unique_ptr<Sampler> sampler, ConverterOptions options, double rootSpacing)
-    : attributes_(std::move(attributes)), targetDir_(std::move(targetDir)), writer_(std::move(writer)),
-      sampler_(std::move(sampler)), options_(options), rootSpacing_(rootSpacing) {
+Indexer::Indexer(Attributes attributes, std::string targetDir,
+                  std::shared_ptr<ConcurrentWriter> writer,
+                  std::unique_ptr<Sampler> sampler,
+                  ConverterOptions options, double rootSpacing)
+    : attributes_(std::move(attributes)),
+      targetDir_(std::move(targetDir)),
+      writer_(std::move(writer)),
+      sampler_(std::move(sampler)),
+      options_(options),
+      rootSpacing_(rootSpacing) {
     rowStride_ = attributes_.getTotalBytes();
-    positionOffset_ = attributes_.getOffset("position");
-
+    posOffset_  = attributes_.getOffset("position");
     for (const Attribute &a : attributes_) {
-        if (a.name_ == "position") {
-            positionAttr_ = a;
-            break;
-        }
+        if (a.name_ == "position") { posAttr_ = a; break; }
     }
-    positionHandler_ = AttributeHandlerRegistry::get(positionAttr_);
+    posHandler_ = AttributeHandlerRegistry::get(posAttr_);
 }
 
-double Indexer::spacingOf(int level) const {
-    return rootSpacing_ / std::pow(2.0, level);
-}
+// ── Morton sort ───────────────────────────────────────────────────────────────
 
-std::shared_ptr<Node> Indexer::buildLocalOctree(const std::shared_ptr<Node> &chunkRoot, uint64_t numPoints) const {
-    uint64_t threshold = std::max<uint64_t>(options_.firstChunkSize, 1);
+void Indexer::mortonSort(const std::vector<uint8_t> &rows, const BoundingBoxd &bb,
+                          std::vector<uint32_t> &sortedIdx,
+                          std::vector<uint64_t> &codes) const {
+    if (rowStride_ == 0 || rows.empty()) return;
+    uint64_t n = rows.size() / rowStride_;
 
-    int depth = 0;
-    while ((numPoints >> (3 * depth)) > threshold) ++depth;
+    codes.resize(n);
+    sortedIdx.resize(n);
+    std::iota(sortedIdx.begin(), sortedIdx.end(), 0u);
 
-    std::vector<std::shared_ptr<Node>> level = {chunkRoot};
-    for (int d = 0; d < depth; ++d) {
-        std::vector<std::shared_ptr<Node>> next;
-        next.reserve(level.size() * 8);
-
-        for (const std::shared_ptr<Node> &node : level) {
-            for (int c = 0; c < 8; ++c) {
-                BoundingBoxd childBB = octree_naming::childBoundingBox(node->bb_, c);
-                auto child = std::make_shared<Node>(node->name_ + std::to_string(c), childBB, node);
-                child->level_ = node->level_ + 1;
-                node->children_[c] = child;
-                next.push_back(child);
-            }
-        }
-
-        level = std::move(next);
+    for (uint64_t i = 0; i < n; ++i) {
+        double pos[3] = {};
+        posHandler_->decode(rows.data() + i * rowStride_ + posOffset_, posAttr_, pos);
+        codes[i] = octree_naming::mortonOf({pos[0], pos[1], pos[2]}, bb);
     }
 
-    return chunkRoot;
+    std::sort(sortedIdx.begin(), sortedIdx.end(),
+              [&](uint32_t a, uint32_t b) { return codes[a] < codes[b]; });
 }
 
-void Indexer::loadAndDistribute(const std::shared_ptr<Node> &localRoot, const ChunkInfo &chunk,
-                                 std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints) const {
-    if (rowStride_ == 0) return;
+// ── buildLocalOctree ──────────────────────────────────────────────────────────
 
-    std::filesystem::path chunkFile = std::filesystem::path(targetDir_) / "chunks" / (chunk.name + ".bin");
-    std::ifstream in(chunkFile, std::ios::binary);
-    if (!in.is_open()) return;
+void Indexer::buildLocalOctree(const std::shared_ptr<Node> &node,
+                                const std::vector<uint8_t> &rows,
+                                const std::vector<uint32_t> &sortedIdx,
+                                const std::vector<uint64_t> &codes,
+                                size_t begin, size_t end,
+                                int level, int maxDepth,
+                                bool allowRefinement,
+                                std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints) const {
+    size_t n = end - begin;
+    if (n == 0) return;
 
-    std::vector<uint8_t> row(rowStride_);
-    while (in.read(reinterpret_cast<char *>(row.data()), static_cast<std::streamsize>(rowStride_))) {
-        double posOut[3] = {0, 0, 0};
-        positionHandler_->decode(row.data() + positionOffset_, positionAttr_, posOut);
-        vec3d p{posOut[0], posOut[1], posOut[2]};
+    bool atLeaf = (level >= maxDepth) || (n <= static_cast<size_t>(options_.firstChunkSize));
 
-        std::shared_ptr<Node> node = localRoot;
-        while (node->children_[0]) {
-            int idx = octree_naming::childIndexOf(p, node->bb_);
-            node = node->children_[idx];
+    if (atLeaf) {
+        if (allowRefinement && n > static_cast<size_t>(options_.firstChunkSize) && level >= maxDepth) {
+            // Refinement: copy this sub-range, re-sort relative to node->bb_,
+            // and recurse from level 0.
+            std::vector<uint8_t> subRows(n * rowStride_);
+            for (size_t i = 0; i < n; ++i)
+                std::memcpy(subRows.data() + i * rowStride_,
+                            rows.data() + sortedIdx[begin + i] * rowStride_,
+                            rowStride_);
+
+            std::vector<uint32_t> subIdx;
+            std::vector<uint64_t> subCodes;
+            mortonSort(subRows, node->bb_, subIdx, subCodes);
+            buildLocalOctree(node, subRows, subIdx, subCodes,
+                             0, n, 0, maxDepth, false, nodePoints);
+        } else {
+            std::vector<uint8_t> &pts = nodePoints[node.get()];
+            pts.resize(n * rowStride_);
+            for (size_t i = 0; i < n; ++i)
+                std::memcpy(pts.data() + i * rowStride_,
+                            rows.data() + sortedIdx[begin + i] * rowStride_,
+                            rowStride_);
         }
-
-        std::vector<uint8_t> &buf = nodePoints[node.get()];
-        buf.insert(buf.end(), row.begin(), row.end());
-    }
-}
-
-void Indexer::sampleRecursive(const std::shared_ptr<Node> &node,
-                               std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints,
-                               const std::unordered_set<Node *> &stopNodes,
-                               std::vector<uint8_t> &rejectedOut) const {
-    if (stopNodes.find(node.get()) != stopNodes.end()) {
-        // Already sampled and flushed by indexChunk(); just hand its leftover
-        // (overflow) points up to the parent without touching it again.
-        auto it = nodePoints.find(node.get());
-        rejectedOut = (it != nodePoints.end()) ? std::move(it->second) : std::vector<uint8_t>();
-        if (it != nodePoints.end()) nodePoints.erase(it);
         return;
     }
 
+    // Scan sorted range for per-octant boundaries.
+    size_t childBegin[9];
+    childBegin[0] = begin;
+    for (int c = 0; c < 8; ++c) {
+        size_t i = childBegin[c];
+        while (i < end && octree_naming::mortonChildAt(codes[sortedIdx[i]], level) == c) ++i;
+        childBegin[c + 1] = i;
+    }
+
+    for (int c = 0; c < 8; ++c) {
+        if (childBegin[c] == childBegin[c + 1]) continue;
+        BoundingBoxd childBB = octree_naming::childBoundingBox(node->bb_, c);
+        auto child = std::make_shared<Node>(node->name_ + std::to_string(c), childBB, node);
+        child->level_ = node->level_ + 1;
+        maxLevel_ = std::max(maxLevel_, child->level_);
+        node->children_[c] = child;
+        buildLocalOctree(child, rows, sortedIdx, codes,
+                         childBegin[c], childBegin[c + 1],
+                         level + 1, maxDepth, allowRefinement, nodePoints);
+    }
+}
+
+// ── sampleBottomUp ────────────────────────────────────────────────────────────
+//
+// Used by indexChunk. Processes the entire local octree under `node` (no stop
+// nodes). Every node calls onNodeComplete. Returns the rejected rows from this
+// node (= the overflow that the caller saves to chunk_roots.bin for chunkRoot).
+
+std::vector<uint8_t> Indexer::sampleBottomUp(
+    const std::shared_ptr<Node> &node,
+    std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints,
+    bool isTaskRoot,
+    std::vector<uint8_t> *taskRootAccepted) const {
     std::vector<uint8_t> candidates;
 
     auto it = nodePoints.find(node.get());
@@ -127,117 +149,248 @@ void Indexer::sampleRecursive(const std::shared_ptr<Node> &node,
 
     for (int c = 0; c < 8; ++c) {
         if (!node->children_[c]) continue;
-
-        std::vector<uint8_t> childRejected;
-        sampleRecursive(node->children_[c], nodePoints, stopNodes, childRejected);
+        auto childRejected = sampleBottomUp(node->children_[c], nodePoints, false);
         candidates.insert(candidates.end(), childRejected.begin(), childRejected.end());
     }
 
-    PointBatch batch{candidates.data(), rowStride_ > 0 ? candidates.size() / rowStride_ : 0, rowStride_};
-
+    PointBatch batch{candidates.data(),
+                     rowStride_ > 0 ? candidates.size() / rowStride_ : 0,
+                     rowStride_};
     std::vector<uint8_t> accepted, rejected;
-    sampler_->sample(batch, node->bb_, spacingOf(node->level_), attributes_, accepted, rejected);
+    sampler_->doSample(batch, node, spacingOf(node->level_), accepted, rejected);
 
-    if (!node->parent_) {
-        // Root has no parent to hand rejected points to; keep everything.
+    if (isTaskRoot) {
+        // Defer onNodeComplete to the caller (mergeChunks) so the correct
+        // accepted/overflow split can be applied per case.
+        if (taskRootAccepted) *taskRootAccepted = std::move(accepted);
+    } else {
+        sampler_->onNodeComplete(node, accepted);
+    }
+
+    return rejected;
+}
+
+// ── sampleSkeleton ────────────────────────────────────────────────────────────
+//
+// Used by mergeChunks general case. Processes skeleton nodes (above chunk roots).
+// At stop nodes (chunk roots): calls onNodeComplete(stopNode, accepted), then
+//   returns the overflow as candidates for the parent.
+// At skeleton nodes: collects candidates from children, samples, calls
+//   onNodeComplete. Returns rejected for the parent.
+// At the global root (isRoot=true): folds rejected back into accepted (no parent).
+//
+// skeletonData maps each chunk root Node* to {accepted, overflow}.
+
+std::vector<uint8_t> Indexer::sampleSkeleton(
+    const std::shared_ptr<Node> &node,
+    std::unordered_map<Node *, std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> &skeletonData,
+    const std::unordered_set<Node *> &stopNodes,
+    bool isRoot) const {
+    if (stopNodes.count(node.get())) {
+        // Chunk root: write its accepted (deferred from indexChunk), return overflow
+        // as candidates for the parent skeleton node.
+        auto &data = skeletonData[node.get()];
+        sampler_->onNodeComplete(node, data.first);
+        return data.second;
+    }
+
+    std::vector<uint8_t> candidates;
+    for (int c = 0; c < 8; ++c) {
+        if (!node->children_[c]) continue;
+        auto childCandidates = sampleSkeleton(node->children_[c], skeletonData, stopNodes, false);
+        candidates.insert(candidates.end(), childCandidates.begin(), childCandidates.end());
+    }
+
+    PointBatch batch{candidates.data(),
+                     rowStride_ > 0 ? candidates.size() / rowStride_ : 0,
+                     rowStride_};
+    std::vector<uint8_t> accepted, rejected;
+    sampler_->doSample(batch, node, spacingOf(node->level_), accepted, rejected);
+
+    if (isRoot) {
+        // Global root has no parent — absorb rejected so no points are dropped.
         accepted.insert(accepted.end(), rejected.begin(), rejected.end());
         rejected.clear();
     }
 
-    flushNode(node, accepted);
-    rejectedOut = std::move(rejected);
+    sampler_->onNodeComplete(node, accepted);
+    return rejected;
 }
 
-void Indexer::flushNode(const std::shared_ptr<Node> &node, const std::vector<uint8_t> &acceptedRows) const {
-    ConcurrentWriter::WriteResult result = writer_->append("octree.bin", acceptedRows);
-
-    node->address_ = result.offset;
-    node->byteSize_ = result.size;
-    node->numPoints_ = rowStride_ > 0 ? static_cast<uint32_t>(acceptedRows.size() / rowStride_) : 0;
-
-    for (uint32_t i = 0; i < node->numPoints_; ++i) {
-        double posOut[3] = {0, 0, 0};
-        positionHandler_->decode(acceptedRows.data() + i * rowStride_ + positionOffset_, positionAttr_, posOut);
-        node->tightBB_.expand({posOut[0], posOut[1], posOut[2]});
-    }
-}
+// ── indexChunk ────────────────────────────────────────────────────────────────
 
 bool Indexer::indexChunk(const std::shared_ptr<Node> &chunkRoot, const ChunkInfo &chunk) {
-    std::shared_ptr<Node> localRoot = buildLocalOctree(chunkRoot, chunk.numPoints);
+    std::filesystem::path chunkFile =
+        std::filesystem::path(targetDir_) / "chunks" / (chunk.name + ".bin");
+    std::ifstream in(chunkFile, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) return false;
+
+    std::streamsize fileSize = in.tellg();
+    in.seekg(0);
+    std::vector<uint8_t> rows(static_cast<size_t>(fileSize));
+    if (!in.read(reinterpret_cast<char *>(rows.data()), fileSize)) return false;
+
+    std::vector<uint32_t> sortedIdx;
+    std::vector<uint64_t> codes;
+    mortonSort(rows, chunkRoot->bb_, sortedIdx, codes);
 
     std::unordered_map<Node *, std::vector<uint8_t>> nodePoints;
-    loadAndDistribute(localRoot, chunk, nodePoints);
+    size_t n = rowStride_ > 0 ? rows.size() / rowStride_ : 0;
+    buildLocalOctree(chunkRoot, rows, sortedIdx, codes,
+                     0, n, 0, kMaxLocalDepth, true, nodePoints);
 
-    std::vector<uint8_t> rejected;
-    sampleRecursive(localRoot, nodePoints, {}, rejected);
+    // Sample all nodes except chunkRoot (task root). onNodeComplete for
+    // chunkRoot is deferred to mergeChunks so it can be called once with
+    // the correct final accepted set (which depends on whether chunkRoot is
+    // the global root or a skeleton node).
+    ChunkRootRecord rec;
+    rec.nodePtr  = chunkRoot.get();
+    rec.overflow = sampleBottomUp(chunkRoot, nodePoints, true, &rec.accepted);
 
-    std::lock_guard<std::mutex> lock(overflowMutex_);
-    chunkOverflow_[chunkRoot.get()] = std::move(rejected);
+    {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        chunkRootRecords_.push_back(std::move(rec));
+    }
 
     return true;
 }
 
-void Indexer::collectChunkRoots(const std::shared_ptr<Node> &node,
-                                 const std::unordered_set<std::string> &chunkNames,
-                                 std::unordered_set<Node *> &outStopNodes,
-                                 std::unordered_map<Node *, std::vector<uint8_t>> &outNodePoints) const {
-    if (chunkNames.count(node->name_)) {
-        outStopNodes.insert(node.get());
+// ── mergeChunks ───────────────────────────────────────────────────────────────
 
-        auto it = chunkOverflow_.find(node.get());
-        outNodePoints[node.get()] = (it != chunkOverflow_.end()) ? it->second : std::vector<uint8_t>();
-        return;
-    }
+bool Indexer::mergeChunks(const std::shared_ptr<Node> &root,
+                           const std::vector<ChunkInfo> &chunks) {
+    // Collect in-memory accepted + overflow for all chunk roots.
+    // accepted was deferred from indexChunk; overflow flows up to skeleton.
+    struct ChunkRootData {
+        std::vector<uint8_t> accepted;
+        std::vector<uint8_t> overflow;
+    };
+    std::unordered_set<Node *> stopNodes;
+    std::unordered_map<Node *, ChunkRootData> nodeData;
 
-    for (int c = 0; c < 8; ++c) {
-        if (node->children_[c]) collectChunkRoots(node->children_[c], chunkNames, outStopNodes, outNodePoints);
-    }
-}
-
-bool Indexer::mergeChunks(const std::shared_ptr<Node> &root, const std::vector<ChunkInfo> &chunks) {
-    std::unordered_set<std::string> chunkNames;
-    for (const ChunkInfo &chunk : chunks) chunkNames.insert(chunk.name);
-
-    // If root itself is a chunk root, it was already fully sampled and
-    // flushed by indexChunk(); nothing left to merge above it.
-    if (!chunkNames.count(root->name_)) {
-        std::unordered_map<Node *, std::vector<uint8_t>> nodePoints;
-        std::unordered_set<Node *> stopNodes;
-        collectChunkRoots(root, chunkNames, stopNodes, nodePoints);
-
-        std::vector<uint8_t> rootRejected;
-        sampleRecursive(root, nodePoints, stopNodes, rootRejected);
-    }
-
-    writeHierarchy(root);
-    return true;
-}
-
-void Indexer::writeHierarchy(const std::shared_ptr<Node> &root) {
-    maxLevel_ = 0;
-
-    std::vector<uint8_t> records;
-    std::deque<std::shared_ptr<Node>> queue = {root};
-
-    while (!queue.empty()) {
-        std::shared_ptr<Node> node = queue.front();
-        queue.pop_front();
-
-        uint8_t childMask = 0;
-        for (int c = 0; c < 8; ++c) {
-            if (node->children_[c]) {
-                childMask |= static_cast<uint8_t>(1u << c);
-                queue.push_back(node->children_[c]);
-            }
+    {
+        std::lock_guard<std::mutex> lock(recordsMutex_);
+        for (ChunkRootRecord &cr : chunkRootRecords_) {
+            stopNodes.insert(cr.nodePtr);
+            nodeData[cr.nodePtr] = {std::move(cr.accepted), std::move(cr.overflow)};
         }
-
-        node->childMask_ = childMask;
-        node->type_ = childMask == 0 ? NodeType::Leaf : NodeType::Normal;
-        maxLevel_ = std::max(maxLevel_, node->level_);
-
-        appendRecord(records, node);
     }
 
-    ConcurrentWriter::WriteResult result = writer_->append("hierarchy.bin", records);
-    hierarchyByteSize_ = result.size;
+    // Special case: root itself is a chunk root — fold all overflow back into
+    // accepted (global root has no parent, no points should be discarded).
+    if (stopNodes.count(root.get())) {
+        auto &data = nodeData[root.get()];
+        data.accepted.insert(data.accepted.end(), data.overflow.begin(), data.overflow.end());
+        sampler_->onNodeComplete(root, data.accepted);
+        return true;
+    }
+
+    // General case: sample skeleton nodes above chunk roots via sampleSkeleton.
+    // Build the overflow map that sampleSkeleton reads at stop nodes.
+    std::unordered_map<Node *, std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> skeletonData;
+    for (auto &[nodePtr, data] : nodeData)
+        skeletonData[nodePtr] = {std::move(data.accepted), std::move(data.overflow)};
+
+    sampleSkeleton(root, skeletonData, stopNodes, true);
+    return true;
+}
+
+// ── rebuildIndex ──────────────────────────────────────────────────────────────
+
+bool Indexer::rebuildIndex() {
+    namespace fs = std::filesystem;
+
+    // Flush writer before reading header files from disk (they're buffered in
+    // the writer until this point). Re-opening streams for hierarchy.bin
+    // afterwards is fine: it's a new file not yet in the writer's registry.
+    writer_->flushAll();
+
+    fs::path chunksDir    = fs::path(targetDir_) / "chunks";
+    fs::path rootHeader   = chunksDir / "r.header.bin";
+
+    // Enumerate batch header files (name length == stepSize+1, extension .bin).
+    std::vector<fs::path> batchFiles;
+    if (fs::exists(chunksDir)) {
+        for (const auto &e : fs::directory_iterator(chunksDir)) {
+            if (!e.is_regular_file()) continue;
+            if (e.path().extension() != ".bin") continue;
+            std::string stem = e.path().stem().string();
+            if (static_cast<uint32_t>(stem.size()) == options_.stepSize + 1)
+                batchFiles.push_back(e.path());
+        }
+        std::sort(batchFiles.begin(), batchFiles.end());
+    }
+
+    // Read root-group header.
+    auto readFile = [](const fs::path &p) -> std::vector<uint8_t> {
+        std::ifstream in(p, std::ios::binary | std::ios::ate);
+        if (!in.is_open()) return {};
+        size_t sz = static_cast<size_t>(in.tellg());
+        in.seekg(0);
+        std::vector<uint8_t> buf(sz);
+        in.read(reinterpret_cast<char *>(buf.data()), static_cast<std::streamsize>(sz));
+        return buf;
+    };
+
+    std::vector<uint8_t> rootSection = readFile(rootHeader);
+
+    std::vector<std::vector<uint8_t>> batchSections(batchFiles.size());
+    for (size_t i = 0; i < batchFiles.size(); ++i)
+        batchSections[i] = readFile(batchFiles[i]);
+
+    // Compute where each batch section starts in the final hierarchy.bin.
+    constexpr size_t kRecordSize = 22;
+    std::vector<uint64_t> batchOffset(batchFiles.size());
+    uint64_t cursor = static_cast<uint64_t>(rootSection.size());
+    for (size_t i = 0; i < batchFiles.size(); ++i) {
+        batchOffset[i] = cursor;
+        cursor += static_cast<uint64_t>(batchSections[i].size());
+    }
+
+    // Patch Proxy records in the root section: records written with
+    // NodeType::Proxy and address==0 / byteSize==0 are placeholders written
+    // by onNodeComplete for batch-boundary nodes. Fill them with the actual
+    // offset+size of their corresponding batch section.
+    size_t numRoot = rootSection.size() / kRecordSize;
+    size_t patchIdx = 0;
+    for (size_t r = 0; r < numRoot && patchIdx < batchFiles.size(); ++r) {
+        uint8_t *rec = rootSection.data() + r * kRecordSize;
+        if (rec[0] != static_cast<uint8_t>(NodeType::Proxy)) continue;
+        uint64_t off  = batchOffset[patchIdx];
+        uint64_t size = static_cast<uint64_t>(batchSections[patchIdx].size());
+        std::memcpy(rec + 6,  &off,  8);
+        std::memcpy(rec + 14, &size, 8);
+        ++patchIdx;
+    }
+
+    // Assemble and write hierarchy.bin.
+    std::vector<uint8_t> hierarchyBin;
+    hierarchyBin.reserve(cursor);
+    hierarchyBin.insert(hierarchyBin.end(), rootSection.begin(), rootSection.end());
+    for (auto &section : batchSections)
+        hierarchyBin.insert(hierarchyBin.end(), section.begin(), section.end());
+
+    writer_->append("hierarchy.bin", hierarchyBin);
+
+    // Update metadata.json: hierarchy.firstChunkSize = root section byte size
+    // (the portion the viewer always loads); hierarchy.depth = max octree level.
+    fs::path metaPath = fs::path(targetDir_) / "metadata.json";
+    if (fs::exists(metaPath)) {
+        std::ifstream metaIn(metaPath);
+        nlohmann::json j;
+        metaIn >> j;
+        metaIn.close();
+
+        j["hierarchy"]["firstChunkSize"] = static_cast<uint64_t>(rootSection.size());
+        j["hierarchy"]["depth"] = maxLevel_;
+
+        std::ofstream metaOut(metaPath);
+        metaOut << j.dump(4);
+    }
+
+    // Clean up intermediate files.
+    std::error_code ec;
+    fs::remove_all(chunksDir, ec);
+
+    return true;
 }

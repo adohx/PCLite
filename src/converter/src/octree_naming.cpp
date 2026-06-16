@@ -95,4 +95,31 @@ int childIndexOf(const vec3d &p, const BoundingBoxd &parentBB) {
     return 4 * X + 2 * Y + Z;
 }
 
+uint64_t mortonEncode(uint32_t ix, uint32_t iy, uint32_t iz) {
+    uint64_t code = 0;
+    for (int i = 0; i < 21; ++i) {
+        int shift = 60 - 3 * i;
+        code |= static_cast<uint64_t>((ix >> (20 - i)) & 1u) << (shift + 2);
+        code |= static_cast<uint64_t>((iy >> (20 - i)) & 1u) << (shift + 1);
+        code |= static_cast<uint64_t>((iz >> (20 - i)) & 1u) << shift;
+    }
+    return code;
+}
+
+uint64_t mortonOf(const vec3d &p, const BoundingBoxd &aabb) {
+    constexpr int kDepth = 21;
+    constexpr uint32_t kGrid = 1u << kDepth;
+
+    vec3d lo = aabb.min();
+    vec3d sz = aabb.getSize();
+
+    auto toInt = [&](double v, double origin, double extent) -> uint32_t {
+        double u = extent != 0.0 ? (v - origin) / extent : 0.0;
+        int64_t i = static_cast<int64_t>(std::floor(u * kGrid));
+        return static_cast<uint32_t>(std::clamp<int64_t>(i, 0, kGrid - 1));
+    };
+
+    return mortonEncode(toInt(p.x, lo.x, sz.x), toInt(p.y, lo.y, sz.y), toInt(p.z, lo.z, sz.z));
+}
+
 } // namespace octree_naming

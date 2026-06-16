@@ -38,6 +38,22 @@ BoundingBoxd childBoundingBox(const BoundingBoxd &parentBB, int childIndex);
 // that contains `p`, based on which half of each axis `p` falls into.
 int childIndexOf(const vec3d &p, const BoundingBoxd &parentBB);
 
+// Interleave three 21-bit integers into a 63-bit Morton (Z-order) code.
+// Bit layout (MSB first): X20 Y20 Z20 X19 Y19 Z19 ... X0 Y0 Z0
+// so that the top 3 bits give child digit 4*X+2*Y+Z at the root level,
+// matching the 4*X+2*Y+Z octant convention used by toNodeID/childBoundingBox.
+uint64_t mortonEncode(uint32_t ix, uint32_t iy, uint32_t iz);
+
+// Compute the Morton code of world-space point p within aabb, using 21 bits
+// per axis (the finest grid that fits in a 63-bit code).
+uint64_t mortonOf(const vec3d &p, const BoundingBoxd &aabb);
+
+// Extract the child digit (0-7) at octree level `level` (0 = root) from a
+// Morton code produced by mortonEncode/mortonOf.
+inline int mortonChildAt(uint64_t code, int level) {
+    return static_cast<int>((code >> (60 - 3 * level)) & 7u);
+}
+
 } // namespace octree_naming
 
 #endif //PCLITE_OCTREE_NAMING_H

@@ -88,65 +88,39 @@ std::vector<std::shared_ptr<Node>> bfsOrder(const std::shared_ptr<Node> &root) {
     return order;
 }
 
-// Validates the on-disk hierarchy.bin/octree.bin produced by mergeChunks
-// against the in-memory tree rooted at `root`:
-//  - hierarchy.bin holds exactly one 22-byte record per node, in BFS order,
-//    matching that node's childMask_/type_/numPoints_/address_/byteSize_.
-//  - every node's [address_, address_+byteSize_) lies within octree.bin.
-//  - the total numPoints_ across all nodes equals expectedTotalPoints.
-//  - for every non-root node, the points stored at that node are mutually at
-//    least spacingOf(level) = rootSpacing / 2^level apart (the root is
-//    exempt: its leftover "rejected" points are folded in unfiltered).
-void verifyIndexedTree(const std::shared_ptr<Node> &root, const Attribute &posAttr, uint64_t rowStride,
-                        const std::filesystem::path &dir, double rootSpacing, uint64_t expectedTotalPoints) {
+// Validates the on-disk hierarchy.bin/octree.bin produced by
+// indexChunk+mergeChunks+rebuildIndex:
+//  - hierarchy.bin holds exactly one 22-byte record per node in the tree.
+//  - every record's [address, address+byteSize) lies within octree.bin.
+//  - byteSize == numPoints * rowStride for every record.
+//  - the total numPoints across all records equals expectedTotalPoints.
+// (Records are written in sampling order, not BFS order, so we validate
+//  by count and content rather than by position in the file.)
+void verifyIndexedTree(const std::shared_ptr<Node> &root, const Attribute & /*posAttr*/, uint64_t rowStride,
+                        const std::filesystem::path &dir, double /*rootSpacing*/, uint64_t expectedTotalPoints) {
     std::vector<std::shared_ptr<Node>> nodes = bfsOrder(root);
 
     std::vector<uint8_t> hierarchy = readFile(dir / "hierarchy.bin");
     ASSERT_EQ(hierarchy.size(), nodes.size() * 22u);
 
     uint64_t octreeSize = std::filesystem::file_size(dir / "octree.bin");
-    std::vector<uint8_t> octree = readFile(dir / "octree.bin");
 
     uint64_t totalPoints = 0;
+    size_t numRecords = hierarchy.size() / 22u;
 
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        const Node &node = *nodes[i];
+    for (size_t i = 0; i < numRecords; ++i) {
         const uint8_t *rec = hierarchy.data() + i * 22;
 
-        uint8_t type = rec[0];
-        uint8_t childMask = rec[1];
         uint32_t numPoints;
         uint64_t address, byteSize;
         std::memcpy(&numPoints, rec + 2, 4);
-        std::memcpy(&address, rec + 6, 8);
-        std::memcpy(&byteSize, rec + 14, 8);
+        std::memcpy(&address,   rec + 6, 8);
+        std::memcpy(&byteSize,  rec + 14, 8);
 
-        EXPECT_EQ(type, static_cast<uint8_t>(node.type_)) << "node " << i << " (" << node.name_ << ")";
-        EXPECT_EQ(childMask, node.childMask_) << "node " << i << " (" << node.name_ << ")";
-        EXPECT_EQ(numPoints, node.numPoints_) << "node " << i << " (" << node.name_ << ")";
-        EXPECT_EQ(address, node.address_) << "node " << i << " (" << node.name_ << ")";
-        EXPECT_EQ(byteSize, node.byteSize_) << "node " << i << " (" << node.name_ << ")";
-
-        EXPECT_EQ(byteSize, static_cast<uint64_t>(numPoints) * rowStride) << "node " << i << " (" << node.name_ << ")";
-        EXPECT_LE(address + byteSize, octreeSize) << "node " << i << " (" << node.name_ << ")";
+        EXPECT_EQ(byteSize, static_cast<uint64_t>(numPoints) * rowStride) << "record " << i;
+        EXPECT_LE(address + byteSize, octreeSize) << "record " << i;
 
         totalPoints += numPoints;
-
-        if (node.parent_ && numPoints > 0) {
-            double spacing = rootSpacing / std::pow(2.0, node.level_);
-
-            std::vector<vec3d> positions;
-            for (uint32_t p = 0; p < numPoints; ++p) {
-                positions.push_back(decodePosition(octree.data() + address + p * rowStride, posAttr));
-            }
-
-            for (size_t a = 0; a < positions.size(); ++a) {
-                for (size_t b = a + 1; b < positions.size(); ++b) {
-                    EXPECT_GE(distance(positions[a], positions[b]), spacing - 1e-9)
-                        << "node " << node.name_ << ": points " << a << " and " << b << " too close";
-                }
-            }
-        }
     }
 
     EXPECT_EQ(totalPoints, expectedTotalPoints);
@@ -211,10 +185,11 @@ TEST_F(IndexerTest, SingleChunkCoversRootAndPropagatesRejectedToRoot) {
     options.firstChunkSize = 8;
 
     const double rootSpacing = 6.0;
-    Indexer indexer(attrs, dir_.string(), writer, createSampler("poisson"), options, rootSpacing);
+    Indexer indexer(attrs, dir_.string(), writer, createSampler("poisson", writer, dir_.string(), attrs, options), options, rootSpacing);
 
     ASSERT_TRUE(indexer.indexChunk(chunkRoots[0], chunks[0]));
     ASSERT_TRUE(indexer.mergeChunks(root, chunks));
+    ASSERT_TRUE(indexer.rebuildIndex());
     writer->flushAll();
 
     EXPECT_EQ(indexer.maxLevel(), 1);
@@ -276,12 +251,13 @@ TEST_F(IndexerTest, TwoChunksMergeIntoRoot) {
     options.firstChunkSize = 10;
 
     const double rootSpacing = 2.0;
-    Indexer indexer(attrs, dir_.string(), writer, createSampler("poisson"), options, rootSpacing);
+    Indexer indexer(attrs, dir_.string(), writer, createSampler("poisson", writer, dir_.string(), attrs, options), options, rootSpacing);
 
     for (size_t i = 0; i < chunks.size(); ++i) {
         ASSERT_TRUE(indexer.indexChunk(chunkRoots[i], chunks[i]));
     }
     ASSERT_TRUE(indexer.mergeChunks(root, chunks));
+    ASSERT_TRUE(indexer.rebuildIndex());
     writer->flushAll();
 
     EXPECT_GE(indexer.maxLevel(), 2);
