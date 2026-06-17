@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "node_management/all_nodes_strategy.h"
-#include "camera/orbit_camera.h"
+#include "camera/perspective_camera.h"
 #include "node.h"
 #include "bounding_box.h"
 
@@ -11,81 +11,66 @@ static std::shared_ptr<Node> makeNode(const std::string& name,
     return n;
 }
 
-// ── computeNodesToLoad ────────────────────────────────────────────────────────
+// ── evaluate ──────────────────────────────────────────────────────────────────
+// AllNodesStrategy::evaluate returns every non-proxy node regardless of load state.
 
-TEST(AllNodesStrategyTest, ReturnsUnloadedNonProxyNodes) {
+TEST(AllNodesStrategyTest, ReturnsAllNonProxyNodes) {
     AllNodesStrategy strategy;
-    OrbitCamera cam;
+    PerspectiveCamera cam;
 
     auto n1 = makeNode("n1");                    // Normal, unloaded → included
     auto n2 = makeNode("n2", NodeType::Leaf);    // Leaf,   unloaded → included
     auto n3 = makeNode("n3", NodeType::Proxy);   // Proxy            → excluded
 
     std::vector<std::shared_ptr<Node>> nodes = {n1, n2, n3};
-    auto result = strategy.computeNodesToLoad(cam, nodes);
+    auto result = strategy.evaluate(cam, nodes);
 
     ASSERT_EQ(result.size(), 2u);
     EXPECT_EQ(result[0], n1.get());
     EXPECT_EQ(result[1], n2.get());
 }
 
-TEST(AllNodesStrategyTest, ExcludesAlreadyLoadedNodes) {
+TEST(AllNodesStrategyTest, IncludesAlreadyLoadedNodes) {
     AllNodesStrategy strategy;
-    OrbitCamera cam;
+    PerspectiveCamera cam;
 
     auto n1 = makeNode("n1");
     auto n2 = makeNode("n2");
     n2->setLoaded(true);
 
     std::vector<std::shared_ptr<Node>> nodes = {n1, n2};
-    auto result = strategy.computeNodesToLoad(cam, nodes);
+    auto result = strategy.evaluate(cam, nodes);
 
-    ASSERT_EQ(result.size(), 1u);
-    EXPECT_EQ(result[0], n1.get());
+    ASSERT_EQ(result.size(), 2u);
 }
 
-TEST(AllNodesStrategyTest, ExcludesLoadingNodes) {
+TEST(AllNodesStrategyTest, IncludesLoadingNodes) {
     AllNodesStrategy strategy;
-    OrbitCamera cam;
+    PerspectiveCamera cam;
 
     auto n1 = makeNode("n1");
-    n1->setLoading(true);   // isLoading but not isLoaded
+    n1->setLoading(true);
     auto n2 = makeNode("n2");
 
     std::vector<std::shared_ptr<Node>> nodes = {n1, n2};
-    // isLoaded() is still false for n1, so strategy DOES return it
-    // (loading state is managed by the caller, not the strategy)
-    auto result = strategy.computeNodesToLoad(cam, nodes);
+    auto result = strategy.evaluate(cam, nodes);
     EXPECT_EQ(result.size(), 2u);
 }
 
 TEST(AllNodesStrategyTest, EmptyNodeListProducesEmptyResult) {
     AllNodesStrategy strategy;
-    OrbitCamera cam;
+    PerspectiveCamera cam;
     std::vector<std::shared_ptr<Node>> nodes;
-    EXPECT_TRUE(strategy.computeNodesToLoad(cam, nodes).empty());
+    EXPECT_TRUE(strategy.evaluate(cam, nodes).empty());
 }
 
-// ── computeNodesToCull ────────────────────────────────────────────────────────
-
-TEST(AllNodesStrategyTest, CullAlwaysReturnsEmpty) {
+TEST(AllNodesStrategyTest, ExcludesOnlyProxyNodes) {
     AllNodesStrategy strategy;
-    OrbitCamera cam;
+    PerspectiveCamera cam;
 
-    auto n1 = makeNode("n1");
-    n1->setLoaded(true);
-    auto n2 = makeNode("n2", NodeType::Leaf);
-    n2->setLoaded(true);
-
-    std::vector<std::shared_ptr<Node>> nodes = {n1, n2};
-    EXPECT_TRUE(strategy.computeNodesToCull(cam, nodes).empty());
-}
-
-TEST(AllNodesStrategyTest, CullEmptyListReturnsEmpty) {
-    AllNodesStrategy strategy;
-    OrbitCamera cam;
-    std::vector<std::shared_ptr<Node>> nodes;
-    EXPECT_TRUE(strategy.computeNodesToCull(cam, nodes).empty());
+    auto proxy = makeNode("p", NodeType::Proxy);
+    std::vector<std::shared_ptr<Node>> nodes = {proxy};
+    EXPECT_TRUE(strategy.evaluate(cam, nodes).empty());
 }
 
 // ── NodeLoader integration ────────────────────────────────────────────────────

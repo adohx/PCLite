@@ -20,8 +20,9 @@ add_subdirectory(src/core)
 add_subdirectory(src/converter)
 add_subdirectory(src/viewer)
 
-add_executable(${PROJECT_NAME} main.cpp)
-target_link_libraries(${PROJECT_NAME} PRIVATE viewer)
+add_executable(${PROJECT_NAME} main.cpp application.cpp)
+target_link_libraries(${PROJECT_NAME} PRIVATE converter viewer)
+target_include_directories(${PROJECT_NAME} PRIVATE src/converter/src src/viewer)
 
 # Standalone point cloud viewer tool
 add_executable(pcl_viewer tools/pcl_viewer.cpp)

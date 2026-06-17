@@ -18,8 +18,15 @@ namespace {
 
 constexpr size_t kHierarchyRecordBytes = 22;
 
-// Serialise one 22-byte hierarchy record for `node` into `out`.
+// Serialise a named hierarchy record for `node` into `out`.
+// Format: [uint8 nameLen][name bytes][22-byte record]
+// The name prefix lets rebuildIndex sort records into BFS order.
 void appendHierarchyRecord(std::vector<uint8_t> &out, const std::shared_ptr<Node> &node) {
+    const std::string &name = node->name_;
+    auto nameLen = static_cast<uint8_t>(std::min(name.size(), size_t(255)));
+    out.push_back(nameLen);
+    out.insert(out.end(), name.begin(), name.begin() + nameLen);
+
     size_t base = out.size();
     out.resize(base + kHierarchyRecordBytes);
     out[base + 0] = static_cast<uint8_t>(node->type_);

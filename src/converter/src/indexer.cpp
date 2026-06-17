@@ -300,15 +300,13 @@ bool Indexer::mergeChunks(const std::shared_ptr<Node> &root,
 bool Indexer::rebuildIndex() {
     namespace fs = std::filesystem;
 
-    // Flush writer before reading header files from disk (they're buffered in
-    // the writer until this point). Re-opening streams for hierarchy.bin
-    // afterwards is fine: it's a new file not yet in the writer's registry.
+    // Flush writer before reading header files from disk.
     writer_->flushAll();
 
-    fs::path chunksDir    = fs::path(targetDir_) / "chunks";
-    fs::path rootHeader   = chunksDir / "r.header.bin";
+    fs::path chunksDir  = fs::path(targetDir_) / "chunks";
+    fs::path rootHeader = chunksDir / "r.header.bin";
 
-    // Enumerate batch header files (name length == stepSize+1, extension .bin).
+    // Enumerate batch header files (stem length == stepSize+1).
     std::vector<fs::path> batchFiles;
     if (fs::exists(chunksDir)) {
         for (const auto &e : fs::directory_iterator(chunksDir)) {
@@ -321,7 +319,16 @@ bool Indexer::rebuildIndex() {
         std::sort(batchFiles.begin(), batchFiles.end());
     }
 
-    // Read root-group header.
+    // ── Parse named records ───────────────────────────────────────────────────
+    // Intermediate header files use format: [uint8 nameLen][name][22-byte record].
+    // Parse into (name, 22-byte data) pairs, then sort into BFS order so the
+    // viewer's loadHierarchyChunk (which expects root-first BFS) works correctly.
+
+    struct NamedRecord {
+        std::string name;
+        std::array<uint8_t, 22> data;
+    };
+
     auto readFile = [](const fs::path &p) -> std::vector<uint8_t> {
         std::ifstream in(p, std::ios::binary | std::ios::ate);
         if (!in.is_open()) return {};
@@ -332,48 +339,83 @@ bool Indexer::rebuildIndex() {
         return buf;
     };
 
-    std::vector<uint8_t> rootSection = readFile(rootHeader);
+    auto parseNamedSection = [](const std::vector<uint8_t> &sec) {
+        std::vector<NamedRecord> records;
+        size_t i = 0;
+        while (i < sec.size()) {
+            if (i + 1 > sec.size()) break;
+            uint8_t nameLen = sec[i++];
+            if (i + nameLen + 22 > sec.size()) break;
+            NamedRecord rec;
+            rec.name.assign(reinterpret_cast<const char *>(sec.data() + i), nameLen);
+            i += nameLen;
+            std::copy(sec.begin() + i, sec.begin() + i + 22, rec.data.begin());
+            i += 22;
+            records.push_back(std::move(rec));
+        }
+        return records;
+    };
 
-    std::vector<std::vector<uint8_t>> batchSections(batchFiles.size());
-    for (size_t i = 0; i < batchFiles.size(); ++i)
-        batchSections[i] = readFile(batchFiles[i]);
+    // BFS comparator: shorter names (= shallower) first; ties broken alphabetically.
+    auto bfsLess = [](const NamedRecord &a, const NamedRecord &b) {
+        if (a.name.size() != b.name.size()) return a.name.size() < b.name.size();
+        return a.name < b.name;
+    };
 
-    // Compute where each batch section starts in the final hierarchy.bin.
-    constexpr size_t kRecordSize = 22;
-    std::vector<uint64_t> batchOffset(batchFiles.size());
-    uint64_t cursor = static_cast<uint64_t>(rootSection.size());
+    // Parse and sort root section.
+    auto rootRaw = readFile(rootHeader);
+    auto rootRecords = parseNamedSection(rootRaw);
+    std::sort(rootRecords.begin(), rootRecords.end(), bfsLess);
+
+    // Parse and sort each batch section.
+    std::vector<std::vector<NamedRecord>> batchRecords(batchFiles.size());
     for (size_t i = 0; i < batchFiles.size(); ++i) {
-        batchOffset[i] = cursor;
-        cursor += static_cast<uint64_t>(batchSections[i].size());
+        auto raw = readFile(batchFiles[i]);
+        batchRecords[i] = parseNamedSection(raw);
+        std::sort(batchRecords[i].begin(), batchRecords[i].end(), bfsLess);
     }
 
-    // Patch Proxy records in the root section: records written with
-    // NodeType::Proxy and address==0 / byteSize==0 are placeholders written
-    // by onNodeComplete for batch-boundary nodes. Fill them with the actual
-    // offset+size of their corresponding batch section.
-    size_t numRoot = rootSection.size() / kRecordSize;
-    size_t patchIdx = 0;
-    for (size_t r = 0; r < numRoot && patchIdx < batchFiles.size(); ++r) {
-        uint8_t *rec = rootSection.data() + r * kRecordSize;
-        if (rec[0] != static_cast<uint8_t>(NodeType::Proxy)) continue;
-        uint64_t off  = batchOffset[patchIdx];
-        uint64_t size = static_cast<uint64_t>(batchSections[patchIdx].size());
-        std::memcpy(rec + 6,  &off,  8);
-        std::memcpy(rec + 14, &size, 8);
-        ++patchIdx;
+    // ── Compute final byte offsets ────────────────────────────────────────────
+    constexpr size_t kRecordSize = 22;
+    uint64_t rootByteSize = static_cast<uint64_t>(rootRecords.size()) * kRecordSize;
+
+    std::vector<uint64_t> batchOffset(batchFiles.size());
+    std::vector<uint64_t> batchByteSize(batchFiles.size());
+    uint64_t cursor = rootByteSize;
+    for (size_t i = 0; i < batchFiles.size(); ++i) {
+        batchOffset[i]   = cursor;
+        batchByteSize[i] = static_cast<uint64_t>(batchRecords[i].size()) * kRecordSize;
+        cursor += batchByteSize[i];
     }
 
-    // Assemble and write hierarchy.bin.
+    // ── Build name→batch index map for Proxy patching ─────────────────────────
+    std::unordered_map<std::string, size_t> batchStemToIdx;
+    for (size_t i = 0; i < batchFiles.size(); ++i)
+        batchStemToIdx[batchFiles[i].stem().string()] = i;
+
+    // ── Patch Proxy records in root section ───────────────────────────────────
+    // Proxy records mark batch-group boundaries; fill in the final offset+size.
+    for (auto &rec : rootRecords) {
+        if (rec.data[0] != static_cast<uint8_t>(NodeType::Proxy)) continue;
+        auto it = batchStemToIdx.find(rec.name);
+        if (it == batchStemToIdx.end()) continue;
+        size_t bIdx = it->second;
+        std::memcpy(rec.data.data() + 6,  &batchOffset[bIdx],   8);
+        std::memcpy(rec.data.data() + 14, &batchByteSize[bIdx], 8);
+    }
+
+    // ── Assemble and write hierarchy.bin ──────────────────────────────────────
     std::vector<uint8_t> hierarchyBin;
     hierarchyBin.reserve(cursor);
-    hierarchyBin.insert(hierarchyBin.end(), rootSection.begin(), rootSection.end());
-    for (auto &section : batchSections)
-        hierarchyBin.insert(hierarchyBin.end(), section.begin(), section.end());
+    for (const auto &rec : rootRecords)
+        hierarchyBin.insert(hierarchyBin.end(), rec.data.begin(), rec.data.end());
+    for (const auto &batch : batchRecords)
+        for (const auto &rec : batch)
+            hierarchyBin.insert(hierarchyBin.end(), rec.data.begin(), rec.data.end());
 
     writer_->append("hierarchy.bin", hierarchyBin);
 
-    // Update metadata.json: hierarchy.firstChunkSize = root section byte size
-    // (the portion the viewer always loads); hierarchy.depth = max octree level.
+    // ── Update metadata.json ──────────────────────────────────────────────────
     fs::path metaPath = fs::path(targetDir_) / "metadata.json";
     if (fs::exists(metaPath)) {
         std::ifstream metaIn(metaPath);
@@ -381,14 +423,14 @@ bool Indexer::rebuildIndex() {
         metaIn >> j;
         metaIn.close();
 
-        j["hierarchy"]["firstChunkSize"] = static_cast<uint64_t>(rootSection.size());
-        j["hierarchy"]["depth"] = maxLevel_;
+        j["hierarchy"]["firstChunkSize"] = rootByteSize;
+        j["hierarchy"]["depth"]          = maxLevel_;
 
         std::ofstream metaOut(metaPath);
         metaOut << j.dump(4);
     }
 
-    // Clean up intermediate files.
+    // ── Clean up intermediate files ───────────────────────────────────────────
     std::error_code ec;
     fs::remove_all(chunksDir, ec);
 

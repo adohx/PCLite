@@ -3,7 +3,7 @@
 #include "node_management/manage_strategy.h"
 #include "node_loader/node_loader.h"
 #include "painter/painter.h"
-#include "camera/orbit_camera.h"
+#include "camera/perspective_camera.h"
 #include "node.h"
 #include "bounding_box.h"
 #include "mat.h"
@@ -35,18 +35,14 @@ public:
     std::vector<Node*> loadedNodes_;
 };
 
+// MockStrategy returns whatever is placed in desired_.
 class MockStrategy : public ManageStrategy {
 public:
-    std::vector<Node*> toLoad_;
-    std::vector<Node*> toCull_;
+    std::vector<Node*> desired_;
 
-    std::vector<Node*> computeNodesToLoad(
+    std::vector<Node*> evaluate(
         const Camera&,
-        const std::vector<std::shared_ptr<Node>>&) override { return toLoad_; }
-
-    std::vector<Node*> computeNodesToCull(
-        const Camera&,
-        const std::vector<std::shared_ptr<Node>>&) override { return toCull_; }
+        const std::vector<std::shared_ptr<Node>>&) override { return desired_; }
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -70,13 +66,13 @@ TEST(NodeManagerTest, AddTreeSkipsProxyRoot) {
     auto root  = makeNode("r", NodeType::Proxy);
     auto child = makeNode("r0");
     root->children_[0] = child;
-    strategy->toLoad_ = {child.get()};
+    strategy->desired_ = {child.get()};
 
     mgr.addPainter(std::unique_ptr<Painter>(painter));
     mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addTree(root);
 
-    OrbitCamera cam;
+    PerspectiveCamera cam;
     mgr.update(cam);
 
     // Proxy root must never reach the painter; only the child does.
@@ -98,13 +94,13 @@ TEST(NodeManagerTest, AddTreeIncludesAllNonProxyDescendants) {
     auto child1 = makeNode("r1");
     root->children_[0] = child0;
     root->children_[1] = child1;
-    strategy->toLoad_ = {child0.get(), child1.get()};
+    strategy->desired_ = {child0.get(), child1.get()};
 
     mgr.addPainter(std::unique_ptr<Painter>(painter));
     mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addTree(root);
 
-    OrbitCamera cam;
+    PerspectiveCamera cam;
     mgr.update(cam);
 
     EXPECT_EQ(loader.loadedNodes_.size(), 2u);
@@ -119,10 +115,14 @@ TEST(NodeManagerTest, UpdateAddsAlreadyLoadedNodesToPainters) {
     node->setLoaded(true);
 
     auto* painter = new MockPainter;
+    auto* strategy = new MockStrategy;
+    strategy->desired_ = {node.get()};
+
     mgr.addPainter(std::unique_ptr<Painter>(painter));
+    mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addNode(node);
 
-    OrbitCamera cam;
+    PerspectiveCamera cam;
     mgr.update(cam);
 
     ASSERT_EQ(painter->added_.size(), 1u);
@@ -135,10 +135,14 @@ TEST(NodeManagerTest, UpdateDoesNotAddSameNodeTwice) {
     node->setLoaded(true);
 
     auto* painter = new MockPainter;
+    auto* strategy = new MockStrategy;
+    strategy->desired_ = {node.get()};
+
     mgr.addPainter(std::unique_ptr<Painter>(painter));
+    mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addNode(node);
 
-    OrbitCamera cam;
+    PerspectiveCamera cam;
     mgr.update(cam);
     mgr.update(cam);
 
@@ -155,13 +159,13 @@ TEST(NodeManagerTest, UpdateLoadsUnloadedNodesViaStrategy) {
     auto* strategy = new MockStrategy;
     MockLoader loader;
     strategy->setNodeLoader(&loader);
-    strategy->toLoad_ = {node.get()};
+    strategy->desired_ = {node.get()};
 
     mgr.addPainter(std::unique_ptr<Painter>(painter));
     mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addNode(node);
 
-    OrbitCamera cam;
+    PerspectiveCamera cam;
     mgr.update(cam);
 
     EXPECT_TRUE(node->isLoaded());
@@ -176,13 +180,13 @@ TEST(NodeManagerTest, UpdateWithoutLoaderDoesNotLoad) {
     auto* painter  = new MockPainter;
     auto* strategy = new MockStrategy;
     // No loader set → strategy->nodeLoader() returns nullptr
-    strategy->toLoad_ = {node.get()};
+    strategy->desired_ = {node.get()};
 
     mgr.addPainter(std::unique_ptr<Painter>(painter));
     mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addNode(node);
 
-    OrbitCamera cam;
+    PerspectiveCamera cam;
     mgr.update(cam);
 
     EXPECT_FALSE(node->isLoaded());
@@ -190,6 +194,8 @@ TEST(NodeManagerTest, UpdateWithoutLoaderDoesNotLoad) {
 }
 
 // ── update: culling ───────────────────────────────────────────────────────────
+// Culling applies only to nodes already in painters. Two updates are needed:
+// (1) desired = {node} to get it into painters, (2) desired = {} to cull it.
 
 TEST(NodeManagerTest, UpdateCullsLoadedNodes) {
     NodeManager mgr;
@@ -198,16 +204,19 @@ TEST(NodeManagerTest, UpdateCullsLoadedNodes) {
 
     auto* painter  = new MockPainter;
     auto* strategy = new MockStrategy;
-    strategy->toCull_ = {node.get()};
+    strategy->desired_ = {node.get()};
 
     mgr.addPainter(std::unique_ptr<Painter>(painter));
     mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addNode(node);
 
-    OrbitCamera cam;
-    mgr.update(cam);
+    PerspectiveCamera cam;
+    mgr.update(cam);   // first pass: node added to painters
+    ASSERT_EQ(painter->added_.size(), 1u);
 
-    // First pass adds to painter; cull pass removes and clears data
+    strategy->desired_.clear();  // strategy no longer wants the node
+    mgr.update(cam);   // second pass: node culled
+
     EXPECT_FALSE(node->isLoaded());
     ASSERT_EQ(painter->removed_.size(), 1u);
     EXPECT_EQ(painter->removed_[0], node.get());
@@ -222,21 +231,23 @@ TEST(NodeManagerTest, CulledNodeCanBeReAddedAfterReload) {
     auto* strategy = new MockStrategy;
     MockLoader loader;
     strategy->setNodeLoader(&loader);
-    strategy->toCull_ = {node.get()};
+    strategy->desired_ = {node.get()};
 
     mgr.addPainter(std::unique_ptr<Painter>(painter));
     mgr.addStrategy(std::unique_ptr<ManageStrategy>(strategy));
     mgr.addNode(node);
 
-    OrbitCamera cam;
-    mgr.update(cam);   // first pass: add → cull
-    EXPECT_FALSE(node->isLoaded());
+    PerspectiveCamera cam;
+    mgr.update(cam);   // first pass: add to painters
     EXPECT_EQ(painter->added_.size(), 1u);
+
+    strategy->desired_.clear();
+    mgr.update(cam);   // second pass: cull
+    EXPECT_FALSE(node->isLoaded());
     EXPECT_EQ(painter->removed_.size(), 1u);
 
-    // Now make strategy load it again instead of culling
-    strategy->toCull_.clear();
-    strategy->toLoad_ = {node.get()};
+    // Strategy wants the node back; loader will reload it
+    strategy->desired_ = {node.get()};
     mgr.update(cam);
 
     EXPECT_TRUE(node->isLoaded());
