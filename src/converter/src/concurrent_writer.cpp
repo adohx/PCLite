@@ -78,6 +78,16 @@ void ConcurrentWriter::writeAt(const std::string &relativePath, uint64_t offset,
     }
 }
 
+void ConcurrentWriter::flush(const std::string &relativePath) {
+    std::lock_guard<std::mutex> lock(registryMutex_);
+
+    auto it = files_.find(relativePath);
+    if (it == files_.end()) return;
+
+    std::lock_guard<std::mutex> fileLock(it->second->mutex);
+    it->second->stream.flush();
+}
+
 void ConcurrentWriter::flushAll() {
     pool_.waitAll();
 

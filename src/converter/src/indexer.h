@@ -24,37 +24,44 @@
 class AttributeHandler;
 class ConcurrentWriter;
 
-// Holds the sampling output for one chunk root: its "promotable" point set,
-// i.e. what indexChunk's bottom-up sampling decided to keep at the chunk
-// root's own level rather than settle back into one of its descendants.
+// Holds the sampling output for one chunk root: a reference to its
+// "promotable" point set on disk (chunks/chunk_roots.bin), i.e. what
+// indexChunk's bottom-up sampling decided to keep at the chunk root's own
+// level rather than settle back into one of its descendants. The bytes
+// themselves are NOT kept in memory — indexChunk writes them to
+// "chunk_roots.bin" immediately and frees them, so mergeChunks can process
+// chunk roots in memory-bounded batches (see MergeTask) instead of holding
+// every chunk root's promotable set in memory at once.
 // onNodeComplete for the chunk root itself is intentionally DEFERRED to
 // mergeChunks, since whether it's the global root (write as-is) or sits
 // under a skeleton (gets tested again, possibly rejected back into) isn't
 // known until the skeleton is walked.
 struct ChunkRootRecord {
     Node *nodePtr = nullptr;
-    std::vector<uint8_t> promotable;
+    uint64_t offset = 0;   // byte offset into "chunk_roots.bin"
+    uint64_t byteSize = 0; // byte size of the promotable set at that offset
 };
 
-// Aggregates one or more ChunkRootRecords into a batch that can be loaded and
-// sampled together (total points <= maxPointsPerChunk).
+// One batch of chunk roots small enough (totalPoints < kMergeTaskPointThreshold,
+// see indexer.cpp) to reload and sample together without holding every chunk
+// root's promotable set in memory simultaneously. Mirrors PotreeConverter's
+// flushChunkRoot/processChunkRoots/reloadChunkRoots batching
+// (Converter/src/indexer.cpp in the reference checkout, see
+// reference_potree_converter memory).
 struct MergeTask {
-    Node *taskRoot = nullptr;                   // skeleton node that is the root of this task
+    std::shared_ptr<Node> taskRoot;             // skeleton node that is the root of this task
     uint64_t totalPoints = 0;
     std::vector<ChunkRootRecord> chunkRoots;    // chunk roots aggregated into this task
 };
 
 // Sampling stage (3.3.3 / 3.3.4): builds a Morton-sorted local octree inside
 // each chunk and samples it bottom-up (writing to octree.bin and per-chunk
-// header.bin files), recording each chunk root's promotable point set in
-// chunkRootRecords_. mergeChunks then samples the skeleton nodes above the
-// chunk roots, with each chunk root's promotable set as its candidate input.
+// header.bin files), recording a disk reference to each chunk root's
+// promotable point set in chunkRootRecords_ (the bytes live in
+// "chunk_roots.bin", not in memory). mergeChunks groups chunk roots into
+// memory-bounded MergeTasks, processes each one (reloading just that task's
+// chunk roots), then samples whatever skeleton remains above all task roots.
 // rebuildIndex finally assembles the global hierarchy.bin.
-//
-// MergeTask/MergeNode/buildMergeTree/collapseToTasks/processTask below are
-// declared but currently unused — mergeChunks samples the whole skeleton in
-// one pass via sampleSkeleton rather than batching it into memory-bounded
-// Tasks.
 class Indexer {
 public:
     Indexer(Attributes attributes,
@@ -65,14 +72,20 @@ public:
             double rootSpacing);
 
     // Builds the Morton-sorted local octree for this chunk under chunkRoot,
-    // samples it bottom-up, and records chunkRoot's promotable point set in
+    // samples it bottom-up, writes chunkRoot's promotable point set to
+    // "chunk_roots.bin", and records a disk reference to it in
     // chunkRootRecords_ (thread-safe). chunkRoot itself is finalised later,
     // by mergeChunks.
     bool indexChunk(const std::shared_ptr<Node> &chunkRoot, const ChunkInfo &chunk);
 
-    // Groups the chunk roots (by total-point batching) into MergeTasks, loads
-    // overflow points from chunk_roots.bin for each Task, rebuilds a local
-    // Morton octree, and samples the skeleton nodes above the chunk roots.
+    // Groups chunkRootRecords_ into memory-bounded MergeTasks (buildMergeTree
+    // + collapseToTasks), processes each one (processTask: reload just that
+    // task's chunk roots from "chunk_roots.bin", sample), then samples
+    // whatever skeleton remains above all task roots — treating each task
+    // root's result as a stand-in chunk root for that final pass. If
+    // everything collapsed into a single task rooted at the global root,
+    // that task's own sampleSkeleton call already wrote root's final data
+    // and no further pass is needed.
     bool mergeChunks(const std::shared_ptr<Node> &root, const std::vector<ChunkInfo> &chunks);
 
     // Assembles hierarchy.bin from the per-chunk header.bin files: root-group
@@ -134,11 +147,14 @@ private:
 
     // ── mergeChunks helpers ───────────────────────────────────────────────────
 
-    // Mirror the skeleton between `node` and the chunk-root layer into a
-    // MergeTask tree, with each chunk root as a leaf task (single chunkRoot).
-    // chunkNameSet is the set of chunk names at the chunk-root layer.
+    // Mirrors the skeleton from `skelNode` down into a MergeNode tree: a node
+    // found in `recordByNode` (a chunk root) becomes a MergeNode leaf holding
+    // that one ChunkRootRecord, with no further recursion into its
+    // descendants (they're already folded into its promotable set by
+    // indexChunk); any other node recurses into its existing children and
+    // sums their totalPoints.
     struct MergeNode {
-        Node *skelNode = nullptr;
+        std::shared_ptr<Node> skelNode;
         uint64_t totalPoints = 0;
         std::vector<ChunkRootRecord> chunkRoots;
         std::vector<std::shared_ptr<MergeNode>> children;
@@ -146,15 +162,30 @@ private:
 
     std::shared_ptr<MergeNode> buildMergeTree(
         const std::shared_ptr<Node> &skelNode,
-        const std::unordered_map<std::string, ChunkRootRecord> &recordByName) const;
+        const std::unordered_map<Node *, ChunkRootRecord> &recordByNode) const;
 
-    // Bottom-up collapse: if a MergeNode's total points < threshold, absorb
-    // children's chunkRoots and delete children. Returns the flat list of Tasks.
+    // Bottom-up collapse: if a MergeNode has no chunkRoots of its own (i.e.
+    // it's a true skeleton node, not itself a chunk root) and its
+    // totalPoints < kMergeTaskPointThreshold, absorb every child's
+    // chunkRoots into itself and discard the children. Afterwards,
+    // chunkRoots.empty() == children.empty() never holds for an internal
+    // node — every surviving MergeNode with chunkRoots set is a Task; flattens
+    // those into the returned list (depth-first, no further recursion below a
+    // Task per the invariant above).
     std::vector<MergeTask> collapseToTasks(const std::shared_ptr<MergeNode> &root) const;
 
-    // Load overflow points for all chunkRoots in a Task from chunk_roots.bin,
-    // distribute them into the local octree under taskRoot, sample bottom-up.
-    bool processTask(const MergeTask &task);
+    // Reloads the promotable bytes for every chunk root in `task` from
+    // "chunk_roots.bin" (batched, just this task's chunk roots — the whole
+    // point of Tasks is to never need every chunk root's bytes in memory at
+    // once), then samples task.taskRoot's subtree via sampleSkeleton with
+    // those chunk roots as stop nodes. If task.taskRoot IS one of its own
+    // chunk roots (a trivial single-leaf task that was never merged with
+    // siblings), sampleSkeleton's stop-node short-circuit makes this a
+    // pass-through, as intended. Returns task.taskRoot's resulting promotable
+    // set (empty if task.taskRoot is the global root — onNodeComplete was
+    // already called for it directly, since it has no parent left to test
+    // the result further).
+    std::vector<uint8_t> processTask(const std::shared_ptr<Node> &root, const MergeTask &task) const;
 
 private:
     Attributes attributes_;

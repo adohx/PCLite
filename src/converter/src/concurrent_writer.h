@@ -44,6 +44,14 @@ public:
     // Block until all pending appendAsync tasks finish, then close all file handles.
     void flushAll();
 
+    // Flushes one file's stream WITHOUT closing it, so its on-disk content is
+    // safe to read back via a separate ifstream while later append() calls to
+    // the same path keep working (unlike flushAll(), which closes every
+    // stream and breaks subsequent writes to already-registered files — see
+    // feedback_concurrent_writer memory). No-op if relativePath was never
+    // written to.
+    void flush(const std::string &relativePath);
+
 private:
     struct FileState {
         std::ofstream stream;

@@ -226,7 +226,17 @@ std::vector<uint8_t> Indexer::sampleSkeleton(
     bool isRoot) const {
     if (stopNodes.count(node.get())) {
         auto it = chunkRootPromotable.find(node.get());
-        return it != chunkRootPromotable.end() ? std::move(it->second) : std::vector<uint8_t>{};
+        std::vector<uint8_t> promotable =
+            it != chunkRootPromotable.end() ? std::move(it->second) : std::vector<uint8_t>{};
+        if (isRoot) {
+            // node is simultaneously the global root and a stop node (e.g.
+            // the whole dataset fit in one chunk, or one task absorbed it
+            // directly) — its promotable set is its final data, no parent
+            // left to test it further.
+            sampler_->onNodeComplete(node, promotable);
+            return {};
+        }
+        return promotable;
     }
 
     std::vector<uint8_t> candidates;
@@ -282,9 +292,17 @@ bool Indexer::indexChunk(const std::shared_ptr<Node> &chunkRoot, const ChunkInfo
     // never finalised here — onNodeComplete for it is deferred to
     // mergeChunks, since whether it's the global root (write as-is) or sits
     // under a skeleton (may be tested/rejected further) isn't known yet.
+    std::vector<uint8_t> promotable = sampleBottomUp(chunkRoot, nodePoints);
+
+    // Write the promotable set to disk immediately and keep only a disk
+    // reference in chunkRootRecords_, so mergeChunks never needs every chunk
+    // root's bytes resident in memory at once (see MergeTask in indexer.h).
+    ConcurrentWriter::WriteResult wr = writer_->append("chunk_roots.bin", promotable);
+
     ChunkRootRecord rec;
-    rec.nodePtr    = chunkRoot.get();
-    rec.promotable = sampleBottomUp(chunkRoot, nodePoints);
+    rec.nodePtr  = chunkRoot.get();
+    rec.offset   = wr.offset;
+    rec.byteSize = wr.size;
 
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
@@ -294,32 +312,142 @@ bool Indexer::indexChunk(const std::shared_ptr<Node> &chunkRoot, const ChunkInfo
     return true;
 }
 
+// ── mergeChunks helpers: memory-bounded chunk-root batching ───────────────────
+//
+// Mirrors PotreeConverter's flushChunkRoot/processChunkRoots/reloadChunkRoots
+// (see reference_potree_converter memory): rather than holding every chunk
+// root's promotable set in memory while sampling the skeleton, group nearby
+// chunk roots into MergeTasks bounded by kMergeTaskPointThreshold, process
+// one Task's worth of data at a time, and only carry forward each Task's own
+// (much smaller, already-sampled) result for the final pass above all task
+// roots.
+
+namespace {
+// Matches PotreeConverter's own threshold for batching chunk roots together
+// (Converter/src/indexer.cpp, processChunkRoots).
+constexpr uint64_t kMergeTaskPointThreshold = 5'000'000;
+} // namespace
+
+std::shared_ptr<Indexer::MergeNode> Indexer::buildMergeTree(
+    const std::shared_ptr<Node> &skelNode,
+    const std::unordered_map<Node *, ChunkRootRecord> &recordByNode) const {
+    auto mnode = std::make_shared<MergeNode>();
+    mnode->skelNode = skelNode;
+
+    auto it = recordByNode.find(skelNode.get());
+    if (it != recordByNode.end()) {
+        mnode->chunkRoots.push_back(it->second);
+        mnode->totalPoints = rowStride_ > 0 ? it->second.byteSize / rowStride_ : 0;
+        return mnode; // chunk root: never recurse into its descendants.
+    }
+
+    for (int c = 0; c < 8; ++c) {
+        if (!skelNode->children_[c]) continue;
+        auto child = buildMergeTree(skelNode->children_[c], recordByNode);
+        mnode->totalPoints += child->totalPoints;
+        mnode->children.push_back(std::move(child));
+    }
+    return mnode;
+}
+
+std::vector<MergeTask> Indexer::collapseToTasks(const std::shared_ptr<MergeNode> &root) const {
+    std::function<void(const std::shared_ptr<MergeNode> &)> collapse =
+        [&](const std::shared_ptr<MergeNode> &node) {
+        for (auto &child : node->children) collapse(child);
+
+        if (node->chunkRoots.empty() && !node->children.empty() &&
+            node->totalPoints < kMergeTaskPointThreshold) {
+            for (auto &child : node->children)
+                node->chunkRoots.insert(node->chunkRoots.end(),
+                                        child->chunkRoots.begin(), child->chunkRoots.end());
+            node->children.clear();
+        }
+    };
+    collapse(root);
+
+    std::vector<MergeTask> tasks;
+    std::function<void(const std::shared_ptr<MergeNode> &)> collect =
+        [&](const std::shared_ptr<MergeNode> &node) {
+        if (!node->chunkRoots.empty()) {
+            MergeTask task;
+            task.taskRoot    = node->skelNode;
+            task.totalPoints = node->totalPoints;
+            task.chunkRoots  = node->chunkRoots;
+            tasks.push_back(std::move(task));
+            return; // chunkRoots non-empty <=> children empty (collapse invariant).
+        }
+        for (auto &child : node->children) collect(child);
+    };
+    collect(root);
+
+    return tasks;
+}
+
+std::vector<uint8_t> Indexer::processTask(const std::shared_ptr<Node> &root,
+                                           const MergeTask &task) const {
+    std::unordered_set<Node *> stopNodes;
+    std::unordered_map<Node *, std::vector<uint8_t>> chunkRootPromotable;
+
+    if (!task.chunkRoots.empty()) {
+        std::ifstream in(std::filesystem::path(targetDir_) / "chunk_roots.bin", std::ios::binary);
+        for (const ChunkRootRecord &cr : task.chunkRoots) {
+            std::vector<uint8_t> buf(cr.byteSize);
+            if (cr.byteSize > 0) {
+                in.seekg(static_cast<std::streamoff>(cr.offset));
+                in.read(reinterpret_cast<char *>(buf.data()), static_cast<std::streamsize>(cr.byteSize));
+            }
+            stopNodes.insert(cr.nodePtr);
+            chunkRootPromotable[cr.nodePtr] = std::move(buf);
+        }
+    }
+
+    bool isGlobalRoot = task.taskRoot.get() == root.get();
+    return sampleSkeleton(task.taskRoot, chunkRootPromotable, stopNodes, isGlobalRoot);
+}
+
 // ── mergeChunks ───────────────────────────────────────────────────────────────
 
 bool Indexer::mergeChunks(const std::shared_ptr<Node> &root,
                            const std::vector<ChunkInfo> &chunks) {
-    // Collect each chunk root's promotable set (computed by indexChunk).
-    std::unordered_set<Node *> stopNodes;
-    std::unordered_map<Node *, std::vector<uint8_t>> chunkRootPromotable;
-
+    std::unordered_map<Node *, ChunkRootRecord> recordByNode;
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
-        for (ChunkRootRecord &cr : chunkRootRecords_) {
-            stopNodes.insert(cr.nodePtr);
-            chunkRootPromotable[cr.nodePtr] = std::move(cr.promotable);
+        for (const ChunkRootRecord &cr : chunkRootRecords_) recordByNode[cr.nodePtr] = cr;
+    }
+
+    // Make pending "chunk_roots.bin" writes visible to the plain ifstream
+    // reads in processTask, without closing it (writer_->flushAll() would
+    // close every stream, breaking the later onNodeComplete() appends to
+    // octree.bin/header.bin within this same call — see
+    // feedback_concurrent_writer memory).
+    writer_->flush("chunk_roots.bin");
+
+    auto mergeTree = buildMergeTree(root, recordByNode);
+    std::vector<MergeTask> tasks = collapseToTasks(mergeTree);
+
+    std::unordered_set<Node *> taskRootStopNodes;
+    std::unordered_map<Node *, std::vector<uint8_t>> taskRootPromotable;
+    bool rootHandled = false;
+
+    for (const MergeTask &task : tasks) {
+        std::vector<uint8_t> result = processTask(root, task);
+        if (task.taskRoot.get() == root.get()) {
+            // processTask already called onNodeComplete(root, ...) directly
+            // (root has no parent left to test the result further).
+            rootHandled = true;
+        } else {
+            taskRootStopNodes.insert(task.taskRoot.get());
+            taskRootPromotable[task.taskRoot.get()] = std::move(result);
         }
     }
 
-    // Special case: root itself is a chunk root (the whole dataset fit in
-    // one chunk, no skeleton above it) — its promotable set IS its final
-    // data, there's no parent left to test it against.
-    if (stopNodes.count(root.get())) {
-        sampler_->onNodeComplete(root, chunkRootPromotable[root.get()]);
-        return true;
+    if (!rootHandled) {
+        // Whatever skeleton remains above all task roots still needs
+        // sampling; each task root's already-sampled result stands in for a
+        // chunk root's promotable set in this final pass.
+        sampleSkeleton(root, taskRootPromotable, taskRootStopNodes, true);
     }
 
-    // General case: sample skeleton nodes above chunk roots via sampleSkeleton.
-    sampleSkeleton(root, chunkRootPromotable, stopNodes, true);
     return true;
 }
 
@@ -523,6 +651,7 @@ bool Indexer::rebuildIndex() {
     // ── Clean up intermediate files ───────────────────────────────────────────
     std::error_code ec;
     fs::remove_all(chunksDir, ec);
+    fs::remove(fs::path(targetDir_) / "chunk_roots.bin", ec);
 
     return true;
 }
