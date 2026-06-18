@@ -115,8 +115,8 @@ TEST_F(SamplerTest, PoissonDisk_LinearChainAcceptsEverySecondPoint) {
     auto sampler = makePoissonSampler(attrs);
     auto node    = makeDummyNode(BoundingBoxd({0, 0, 0}, {2, 2, 2}));
 
-    std::vector<uint8_t> accepted, rejected;
-    sampler->doSample(batch, node, 1.0, accepted, rejected);
+    std::vector<uint8_t> accepted, rejected, flags;
+    sampler->doSample(batch, node, 1.0, accepted, rejected, flags);
 
     EXPECT_EQ(accepted.size() / 12, 2u);
     EXPECT_EQ(rejected.size() / 12, 4u);
@@ -143,8 +143,8 @@ TEST_F(SamplerTest, PoissonDisk_RandomPointsSatisfyPoissonInvariant) {
     auto sampler = makePoissonSampler(attrs);
     auto node    = makeDummyNode(BoundingBoxd({0, 0, 0}, {10, 10, 10}));
 
-    std::vector<uint8_t> accepted, rejected;
-    sampler->doSample(batch, node, 0.5, accepted, rejected);
+    std::vector<uint8_t> accepted, rejected, flags;
+    sampler->doSample(batch, node, 0.5, accepted, rejected, flags);
 
     EXPECT_EQ(accepted.size() + rejected.size(), buf.size());
     EXPECT_GT(accepted.size(), 0u);
@@ -160,8 +160,8 @@ TEST_F(SamplerTest, PoissonDisk_EmptyCandidatesProduceEmptyOutputs) {
     auto sampler = makePoissonSampler(attrs);
     auto node    = makeDummyNode(BoundingBoxd({0, 0, 0}, {1, 1, 1}));
 
-    std::vector<uint8_t> accepted, rejected;
-    sampler->doSample(batch, node, 0.5, accepted, rejected);
+    std::vector<uint8_t> accepted, rejected, flags;
+    sampler->doSample(batch, node, 0.5, accepted, rejected, flags);
 
     EXPECT_TRUE(accepted.empty());
     EXPECT_TRUE(rejected.empty());
@@ -181,8 +181,8 @@ TEST_F(SamplerTest, PoissonDisk_NonPositiveSpacingAcceptsAllPoints) {
     auto sampler = makePoissonSampler(attrs);
     auto node    = makeDummyNode(BoundingBoxd({0, 0, 0}, {1, 1, 1}));
 
-    std::vector<uint8_t> accepted, rejected;
-    sampler->doSample(batch, node, 0.0, accepted, rejected);
+    std::vector<uint8_t> accepted, rejected, flags;
+    sampler->doSample(batch, node, 0.0, accepted, rejected, flags);
 
     EXPECT_EQ(accepted.size(), buf.size());
     EXPECT_TRUE(rejected.empty());

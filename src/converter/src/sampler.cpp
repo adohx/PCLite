@@ -34,13 +34,21 @@ void appendHierarchyRecord(std::vector<uint8_t> &out, const std::shared_ptr<Node
     std::memcpy(out.data() + base + 14, &node->byteSize_, 8);
 }
 
-// Return "chunks/r.header.bin" for nodes in the root group (name length <
-// stepSize+1), or "chunks/<batchName>.header.bin" for batch-group nodes.
+// Recursively buckets nodes into a new hierarchy batch every `stepSize`
+// levels of depth (matching PotreeConverter's hierarchyStepSize behaviour),
+// not just once below the root: a node at depth D belongs to the batch
+// rooted at depth floor(D/stepSize)*stepSize, keyed by the name of the node
+// at that depth. The node at the batch's own deepest level (depth a
+// multiple of stepSize) always starts its own batch, even if it's a leaf,
+// since rebuildIndex() always emits a matching Proxy stub for it in the
+// parent batch.
 std::string headerPath(const std::string &nodeName, uint32_t stepSize) {
-    if (static_cast<uint32_t>(nodeName.size()) < stepSize + 1) {
+    uint32_t depth = static_cast<uint32_t>(nodeName.size()) - 1; // "r" => depth 0
+    uint32_t batchStartDepth = (depth / stepSize) * stepSize;
+    if (batchStartDepth == 0) {
         return "chunks/r.header.bin";
     }
-    return "chunks/" + nodeName.substr(0, stepSize + 1) + ".header.bin";
+    return "chunks/" + nodeName.substr(0, batchStartDepth + 1) + ".header.bin";
 }
 
 } // namespace
@@ -99,19 +107,23 @@ void RandomSampler::doSample(const PointBatch &candidates,
                               const std::shared_ptr<Node> & /*node*/,
                               double spacing,
                               std::vector<uint8_t> &accepted,
-                              std::vector<uint8_t> &rejected) {
+                              std::vector<uint8_t> &rejected,
+                              std::vector<uint8_t> &acceptFlags) {
     accepted.clear();
     rejected.clear();
+    acceptFlags.assign(candidates.numPoints, 0);
     if (candidates.numPoints == 0 || candidates.rowStride == 0) return;
 
     // Keep every other point (stride 2). Adjust stride by spacing if needed.
     uint64_t stride = (spacing > 0.0) ? std::max<uint64_t>(2, 1) : 1;
     for (uint64_t i = 0; i < candidates.numPoints; ++i) {
         const uint8_t *row = candidates.data + i * candidates.rowStride;
-        if (i % stride == 0)
+        if (i % stride == 0) {
             accepted.insert(accepted.end(), row, row + candidates.rowStride);
-        else
+            acceptFlags[i] = 1;
+        } else {
             rejected.insert(rejected.end(), row, row + candidates.rowStride);
+        }
     }
 }
 
@@ -121,14 +133,17 @@ void PoissonDiskSampler::doSample(const PointBatch &candidates,
                                    const std::shared_ptr<Node> &node,
                                    double spacing,
                                    std::vector<uint8_t> &accepted,
-                                   std::vector<uint8_t> &rejected) {
+                                   std::vector<uint8_t> &rejected,
+                                   std::vector<uint8_t> &acceptFlags) {
     accepted.clear();
     rejected.clear();
     const uint64_t n = candidates.numPoints;
+    acceptFlags.assign(n, 0);
     if (n == 0) return;
 
     if (spacing <= 0.0 || !posHandler_) {
         accepted.assign(candidates.data, candidates.data + n * candidates.rowStride);
+        acceptFlags.assign(n, 1);
         return;
     }
 
@@ -201,10 +216,12 @@ void PoissonDiskSampler::doSample(const PointBatch &candidates,
     const uint64_t stride = candidates.rowStride;
     for (uint64_t i = 0; i < n; ++i) {
         const uint8_t *row = candidates.data + i * stride;
-        if (flags[i])
+        if (flags[i]) {
             accepted.insert(accepted.end(), row, row + stride);
-        else
+            acceptFlags[i] = 1;
+        } else {
             rejected.insert(rejected.end(), row, row + stride);
+        }
     }
 }
 
@@ -214,20 +231,24 @@ void PoissonAverageSampler::doSample(const PointBatch &candidates,
                                       const std::shared_ptr<Node> &node,
                                       double spacing,
                                       std::vector<uint8_t> &accepted,
-                                      std::vector<uint8_t> &rejected) {
+                                      std::vector<uint8_t> &rejected,
+                                      std::vector<uint8_t> &acceptFlags) {
     accepted.clear();
     rejected.clear();
+    acceptFlags.assign(candidates.numPoints, 0);
     if (candidates.numPoints == 0) return;
 
     if (spacing <= 0.0) {
         accepted.assign(candidates.data,
                         candidates.data + candidates.numPoints * candidates.rowStride);
+        acceptFlags.assign(candidates.numPoints, 1);
         return;
     }
 
     if (!posHandler_) {
         accepted.assign(candidates.data,
                         candidates.data + candidates.numPoints * candidates.rowStride);
+        acceptFlags.assign(candidates.numPoints, 1);
         return;
     }
 
@@ -285,10 +306,12 @@ void PoissonAverageSampler::doSample(const PointBatch &candidates,
     // Bulk copy: one pass over the flag array.
     for (uint64_t i = 0; i < n; ++i) {
         const uint8_t *row = candidates.data + i * stride;
-        if (flags[i])
+        if (flags[i]) {
             accepted.insert(accepted.end(), row, row + stride);
-        else
+            acceptFlags[i] = 1;
+        } else {
             rejected.insert(rejected.end(), row, row + stride);
+        }
     }
 }
 

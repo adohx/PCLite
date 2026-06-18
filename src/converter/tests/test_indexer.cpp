@@ -147,9 +147,9 @@ protected:
 // A single chunk "r" covers the whole root AABB. Its points form a 4x4x4
 // lattice (spacing 2.0); with firstChunkSize=8 the local octree subdivides
 // once (8 children, 8 points each). With rootSpacing=6.0, spacingOf(1)=3.0
-// is large enough that some points within each child are rejected and bubble
-// up to the root, which (per the root special case) folds its own rejected
-// points back into accepted.
+// is large enough that some points within each child are accepted and
+// promoted up into the root; root has no parent, so its accepted set is its
+// final data.
 TEST_F(IndexerTest, SingleChunkCoversRootAndPropagatesRejectedToRoot) {
     Attribute posAttr = makePositionAttribute();
     Attributes attrs;

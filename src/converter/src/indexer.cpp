@@ -129,93 +129,131 @@ void Indexer::buildLocalOctree(const std::shared_ptr<Node> &node,
     }
 }
 
+namespace {
+
+// One contiguous row-range of `candidates`, contributed by child octant `c`.
+struct ChildRange {
+    int c;
+    size_t begin, end; // row indices, in candidates' own units (not bytes)
+};
+
+// Splits `rejected` rows (per `flags`, in the same row order as `candidates`)
+// back to whichever child contributed each row, and finalises that child via
+// onNodeComplete — this is the child's FINAL data: it is never touched again.
+void finalizeRejectedChildren(Sampler &sampler,
+                               const std::shared_ptr<Node> &node,
+                               const std::vector<uint8_t> &candidates,
+                               uint64_t rowStride,
+                               const std::vector<uint8_t> &flags,
+                               const std::vector<ChildRange> &ranges) {
+    for (const ChildRange &cr : ranges) {
+        std::vector<uint8_t> childRejected;
+        for (size_t i = cr.begin; i < cr.end; ++i) {
+            if (flags[i]) continue;
+            const uint8_t *row = candidates.data() + i * rowStride;
+            childRejected.insert(childRejected.end(), row, row + rowStride);
+        }
+        sampler.onNodeComplete(node->children_[cr.c], childRejected);
+    }
+}
+
+} // namespace
+
 // ── sampleBottomUp ────────────────────────────────────────────────────────────
 //
-// Used by indexChunk. Processes the entire local octree under `node` (no stop
-// nodes). Every node calls onNodeComplete. Returns the rejected rows from this
-// node (= the overflow that the caller saves to chunk_roots.bin for chunkRoot).
+// Used by indexChunk. Post-order traversal matching PotreeConverter's
+// direction: accepted points are promoted UP (to be re-tested by this node's
+// own parent later); rejected points settle back DOWN at whichever child
+// offered them (that child's final, on-disk representation). A structural
+// leaf (no children) is never sampled — its pre-assigned points are returned
+// untouched, exactly as PotreeConverter leaves leaf nodes alone.
 
 std::vector<uint8_t> Indexer::sampleBottomUp(
     const std::shared_ptr<Node> &node,
-    std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints,
-    bool isTaskRoot,
-    std::vector<uint8_t> *taskRootAccepted) const {
-    std::vector<uint8_t> candidates;
-
-    auto it = nodePoints.find(node.get());
-    if (it != nodePoints.end()) {
-        candidates = std::move(it->second);
-        nodePoints.erase(it);
+    std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints) const {
+    bool hasChildren = false;
+    for (int c = 0; c < 8; ++c) {
+        if (node->children_[c]) { hasChildren = true; break; }
     }
 
+    if (!hasChildren) {
+        auto it = nodePoints.find(node.get());
+        if (it == nodePoints.end()) return {};
+        std::vector<uint8_t> pts = std::move(it->second);
+        nodePoints.erase(it);
+        return pts;
+    }
+
+    std::vector<uint8_t> candidates;
+    std::vector<ChildRange> ranges;
     for (int c = 0; c < 8; ++c) {
         if (!node->children_[c]) continue;
-        auto childRejected = sampleBottomUp(node->children_[c], nodePoints, false);
-        candidates.insert(candidates.end(), childRejected.begin(), childRejected.end());
+        auto childPromotable = sampleBottomUp(node->children_[c], nodePoints);
+        size_t begin = rowStride_ > 0 ? candidates.size() / rowStride_ : 0;
+        candidates.insert(candidates.end(), childPromotable.begin(), childPromotable.end());
+        size_t end = rowStride_ > 0 ? candidates.size() / rowStride_ : 0;
+        ranges.push_back({c, begin, end});
     }
 
     PointBatch batch{candidates.data(),
                      rowStride_ > 0 ? candidates.size() / rowStride_ : 0,
                      rowStride_};
-    std::vector<uint8_t> accepted, rejected;
-    sampler_->doSample(batch, node, spacingOf(node->level_), accepted, rejected);
+    std::vector<uint8_t> accepted, rejected, flags;
+    sampler_->doSample(batch, node, spacingOf(node->level_), accepted, rejected, flags);
 
-    if (isTaskRoot) {
-        // Defer onNodeComplete to the caller (mergeChunks) so the correct
-        // accepted/overflow split can be applied per case.
-        if (taskRootAccepted) *taskRootAccepted = std::move(accepted);
-    } else {
-        sampler_->onNodeComplete(node, accepted);
-    }
+    finalizeRejectedChildren(*sampler_, node, candidates, rowStride_, flags, ranges);
 
-    return rejected;
+    return accepted; // promotable set, for this node's own parent to test
 }
 
 // ── sampleSkeleton ────────────────────────────────────────────────────────────
 //
-// Used by mergeChunks general case. Processes skeleton nodes (above chunk roots).
-// At stop nodes (chunk roots): calls onNodeComplete(stopNode, accepted), then
-//   returns the overflow as candidates for the parent.
-// At skeleton nodes: collects candidates from children, samples, calls
-//   onNodeComplete. Returns rejected for the parent.
-// At the global root (isRoot=true): folds rejected back into accepted (no parent).
+// Used by mergeChunks general case. Processes skeleton nodes (above chunk
+// roots) with the same bottom-up direction as sampleBottomUp: accepted moves
+// up, rejected settles back down into whichever child offered it.
+// At stop nodes (chunk roots): returns the promotable set computed earlier by
+//   indexChunk; finalisation is deferred to this node's own parent, same as
+//   any other node.
+// At the global root (isRoot=true): there's no parent left to test the
+//   accepted set further, so it's written directly as the root's final data.
 //
-// skeletonData maps each chunk root Node* to {accepted, overflow}.
+// chunkRootPromotable maps each chunk root Node* to its promotable set.
 
 std::vector<uint8_t> Indexer::sampleSkeleton(
     const std::shared_ptr<Node> &node,
-    std::unordered_map<Node *, std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> &skeletonData,
+    std::unordered_map<Node *, std::vector<uint8_t>> &chunkRootPromotable,
     const std::unordered_set<Node *> &stopNodes,
     bool isRoot) const {
     if (stopNodes.count(node.get())) {
-        // Chunk root: write its accepted (deferred from indexChunk), return overflow
-        // as candidates for the parent skeleton node.
-        auto &data = skeletonData[node.get()];
-        sampler_->onNodeComplete(node, data.first);
-        return data.second;
+        auto it = chunkRootPromotable.find(node.get());
+        return it != chunkRootPromotable.end() ? std::move(it->second) : std::vector<uint8_t>{};
     }
 
     std::vector<uint8_t> candidates;
+    std::vector<ChildRange> ranges;
     for (int c = 0; c < 8; ++c) {
         if (!node->children_[c]) continue;
-        auto childCandidates = sampleSkeleton(node->children_[c], skeletonData, stopNodes, false);
-        candidates.insert(candidates.end(), childCandidates.begin(), childCandidates.end());
+        auto childPromotable = sampleSkeleton(node->children_[c], chunkRootPromotable, stopNodes, false);
+        size_t begin = rowStride_ > 0 ? candidates.size() / rowStride_ : 0;
+        candidates.insert(candidates.end(), childPromotable.begin(), childPromotable.end());
+        size_t end = rowStride_ > 0 ? candidates.size() / rowStride_ : 0;
+        ranges.push_back({c, begin, end});
     }
 
     PointBatch batch{candidates.data(),
                      rowStride_ > 0 ? candidates.size() / rowStride_ : 0,
                      rowStride_};
-    std::vector<uint8_t> accepted, rejected;
-    sampler_->doSample(batch, node, spacingOf(node->level_), accepted, rejected);
+    std::vector<uint8_t> accepted, rejected, flags;
+    sampler_->doSample(batch, node, spacingOf(node->level_), accepted, rejected, flags);
+
+    finalizeRejectedChildren(*sampler_, node, candidates, rowStride_, flags, ranges);
 
     if (isRoot) {
-        // Global root has no parent — absorb rejected so no points are dropped.
-        accepted.insert(accepted.end(), rejected.begin(), rejected.end());
-        rejected.clear();
+        sampler_->onNodeComplete(node, accepted);
+        return {};
     }
 
-    sampler_->onNodeComplete(node, accepted);
-    return rejected;
+    return accepted; // promotable set, for this node's own parent to test
 }
 
 // ── indexChunk ────────────────────────────────────────────────────────────────
@@ -240,13 +278,13 @@ bool Indexer::indexChunk(const std::shared_ptr<Node> &chunkRoot, const ChunkInfo
     buildLocalOctree(chunkRoot, rows, sortedIdx, codes,
                      0, n, 0, kMaxLocalDepth, true, nodePoints);
 
-    // Sample all nodes except chunkRoot (task root). onNodeComplete for
-    // chunkRoot is deferred to mergeChunks so it can be called once with
-    // the correct final accepted set (which depends on whether chunkRoot is
-    // the global root or a skeleton node).
+    // Sample every descendant of chunkRoot bottom-up. chunkRoot itself is
+    // never finalised here — onNodeComplete for it is deferred to
+    // mergeChunks, since whether it's the global root (write as-is) or sits
+    // under a skeleton (may be tested/rejected further) isn't known yet.
     ChunkRootRecord rec;
-    rec.nodePtr  = chunkRoot.get();
-    rec.overflow = sampleBottomUp(chunkRoot, nodePoints, true, &rec.accepted);
+    rec.nodePtr    = chunkRoot.get();
+    rec.promotable = sampleBottomUp(chunkRoot, nodePoints);
 
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
@@ -260,39 +298,28 @@ bool Indexer::indexChunk(const std::shared_ptr<Node> &chunkRoot, const ChunkInfo
 
 bool Indexer::mergeChunks(const std::shared_ptr<Node> &root,
                            const std::vector<ChunkInfo> &chunks) {
-    // Collect in-memory accepted + overflow for all chunk roots.
-    // accepted was deferred from indexChunk; overflow flows up to skeleton.
-    struct ChunkRootData {
-        std::vector<uint8_t> accepted;
-        std::vector<uint8_t> overflow;
-    };
+    // Collect each chunk root's promotable set (computed by indexChunk).
     std::unordered_set<Node *> stopNodes;
-    std::unordered_map<Node *, ChunkRootData> nodeData;
+    std::unordered_map<Node *, std::vector<uint8_t>> chunkRootPromotable;
 
     {
         std::lock_guard<std::mutex> lock(recordsMutex_);
         for (ChunkRootRecord &cr : chunkRootRecords_) {
             stopNodes.insert(cr.nodePtr);
-            nodeData[cr.nodePtr] = {std::move(cr.accepted), std::move(cr.overflow)};
+            chunkRootPromotable[cr.nodePtr] = std::move(cr.promotable);
         }
     }
 
-    // Special case: root itself is a chunk root — fold all overflow back into
-    // accepted (global root has no parent, no points should be discarded).
+    // Special case: root itself is a chunk root (the whole dataset fit in
+    // one chunk, no skeleton above it) — its promotable set IS its final
+    // data, there's no parent left to test it against.
     if (stopNodes.count(root.get())) {
-        auto &data = nodeData[root.get()];
-        data.accepted.insert(data.accepted.end(), data.overflow.begin(), data.overflow.end());
-        sampler_->onNodeComplete(root, data.accepted);
+        sampler_->onNodeComplete(root, chunkRootPromotable[root.get()]);
         return true;
     }
 
     // General case: sample skeleton nodes above chunk roots via sampleSkeleton.
-    // Build the overflow map that sampleSkeleton reads at stop nodes.
-    std::unordered_map<Node *, std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> skeletonData;
-    for (auto &[nodePtr, data] : nodeData)
-        skeletonData[nodePtr] = {std::move(data.accepted), std::move(data.overflow)};
-
-    sampleSkeleton(root, skeletonData, stopNodes, true);
+    sampleSkeleton(root, chunkRootPromotable, stopNodes, true);
     return true;
 }
 
@@ -308,14 +335,19 @@ bool Indexer::rebuildIndex() {
     fs::path rootHeader = chunksDir / "r.header.bin";
 
     // Enumerate batch header files: name is "<batchName>.header.bin" where
-    // batchName.size() == stepSize+1. path::stem() only strips the final
-    // ".bin", leaving ".header" attached (e.g. "r0020.header.bin" ->
-    // "r0020.header", 12 chars) so it can never match stepSize+1 directly —
-    // strip the full ".header.bin" suffix explicitly instead. Otherwise this
-    // both drops every real batch file (their nodes never reach hierarchy.bin)
-    // and misidentifies raw chunk point files (e.g. "r0060.bin", whose stem
-    // happens to be stepSize+1 chars) as batch headers, feeding raw point
-    // bytes through the named-record parser.
+    // batchName != "r" and (batchName.size()-1) is a multiple of stepSize —
+    // i.e. its depth sits exactly on a recursive hierarchy-batch boundary
+    // (stepSize, 2*stepSize, 3*stepSize, ...), matching headerPath()'s
+    // routing. PotreeConverter recurses this batching throughout the whole
+    // tree rather than just once below the root, so this enumerates batches
+    // at every depth, not only the first level.
+    // path::stem() only strips the final ".bin", leaving ".header" attached
+    // (e.g. "r0020.header.bin" -> "r0020.header", 12 chars) so it can never
+    // match directly — strip the full ".header.bin" suffix explicitly
+    // instead. Otherwise this both drops every real batch file (their nodes
+    // never reach hierarchy.bin) and misidentifies raw chunk point files
+    // (e.g. "r0060.bin", whose stem happens to be the right length) as batch
+    // headers, feeding raw point bytes through the named-record parser.
     static constexpr std::string_view kHeaderSuffix = ".header.bin";
     std::vector<fs::path> batchFiles;
     if (fs::exists(chunksDir)) {
@@ -327,7 +359,8 @@ bool Indexer::rebuildIndex() {
                                   kHeaderSuffix.size(), kHeaderSuffix) != 0)
                 continue;
             std::string batchName = filename.substr(0, filename.size() - kHeaderSuffix.size());
-            if (static_cast<uint32_t>(batchName.size()) == options_.stepSize + 1)
+            if (batchName == "r") continue;
+            if ((static_cast<uint32_t>(batchName.size()) - 1) % options_.stepSize == 0)
                 batchFiles.push_back(e.path());
         }
         std::sort(batchFiles.begin(), batchFiles.end());
@@ -376,21 +409,22 @@ bool Indexer::rebuildIndex() {
         return a.name < b.name;
     };
 
-    // Parse root section.
-    auto rootRaw = readFile(rootHeader);
-    auto rootRecords = parseNamedSection(rootRaw);
-
-    // A root-group node at name.size() == stepSize has children whose names
-    // reach stepSize+1, which headerPath() routes to a separate batch file —
-    // those children have no record in this chunk even though childMask says
-    // they exist. The viewer's BFS-positional parser (loadHierarchyChunk)
-    // needs a record at that position to know to lazily fetch the batch
-    // chunk, so insert a placeholder Proxy record per such child; the patch
-    // step below fills in its real address/size once batch offsets are known.
-    {
+    // A batch's own key sits at some depth `keyDepth` (0 for the root batch,
+    // keyed by "r"). Its deepest level (depth == keyDepth+stepSize-1, i.e.
+    // name.size() == keyDepth+stepSize) has children whose names reach one
+    // level deeper, which headerPath() routes to a new batch keyed by that
+    // child's own name — those children have no record in THIS batch even
+    // though childMask says they exist. The viewer's BFS-positional parser
+    // (loadHierarchyChunk) needs a record at that position to know to lazily
+    // fetch the next batch, so insert a placeholder Proxy record per such
+    // child; the patch step below fills in its real address/size once every
+    // batch's offset is known. This mirrors PotreeConverter's recursive
+    // hierarchyStepSize batching, applied at every depth boundary, not just
+    // once below the root.
+    auto insertProxyPlaceholders = [&](std::vector<NamedRecord> &records, size_t keyDepth) {
         std::vector<NamedRecord> proxyPlaceholders;
-        for (const auto &rec : rootRecords) {
-            if (rec.name.size() != options_.stepSize) continue;
+        for (const auto &rec : records) {
+            if (rec.name.size() != keyDepth + options_.stepSize) continue;
             uint8_t mask = rec.data[1];
             for (int c = 0; c < 8; ++c) {
                 if (!((mask >> c) & 1)) continue;
@@ -401,8 +435,13 @@ bool Indexer::rebuildIndex() {
                 proxyPlaceholders.push_back(std::move(proxy));
             }
         }
-        rootRecords.insert(rootRecords.end(), proxyPlaceholders.begin(), proxyPlaceholders.end());
-    }
+        records.insert(records.end(), proxyPlaceholders.begin(), proxyPlaceholders.end());
+    };
+
+    // Parse root section.
+    auto rootRaw = readFile(rootHeader);
+    auto rootRecords = parseNamedSection(rootRaw);
+    insertProxyPlaceholders(rootRecords, 0);
     std::sort(rootRecords.begin(), rootRecords.end(), bfsLess);
 
     // Parse and sort each batch section.
@@ -410,6 +449,9 @@ bool Indexer::rebuildIndex() {
     for (size_t i = 0; i < batchFiles.size(); ++i) {
         auto raw = readFile(batchFiles[i]);
         batchRecords[i] = parseNamedSection(raw);
+        std::string filename = batchFiles[i].filename().string();
+        std::string batchName = filename.substr(0, filename.size() - kHeaderSuffix.size());
+        insertProxyPlaceholders(batchRecords[i], batchName.size() - 1);
         std::sort(batchRecords[i].begin(), batchRecords[i].end(), bfsLess);
     }
 
@@ -437,16 +479,20 @@ bool Indexer::rebuildIndex() {
         batchStemToIdx[filename.substr(0, filename.size() - kHeaderSuffix.size())] = i;
     }
 
-    // ── Patch Proxy records in root section ───────────────────────────────────
+    // ── Patch Proxy records in every batch (root + all recursive batches) ─────
     // Proxy records mark batch-group boundaries; fill in the final offset+size.
-    for (auto &rec : rootRecords) {
-        if (rec.data[0] != static_cast<uint8_t>(NodeType::Proxy)) continue;
-        auto it = batchStemToIdx.find(rec.name);
-        if (it == batchStemToIdx.end()) continue;
-        size_t bIdx = it->second;
-        std::memcpy(rec.data.data() + 6,  &batchOffset[bIdx],   8);
-        std::memcpy(rec.data.data() + 14, &batchByteSize[bIdx], 8);
-    }
+    auto patchProxies = [&](std::vector<NamedRecord> &records) {
+        for (auto &rec : records) {
+            if (rec.data[0] != static_cast<uint8_t>(NodeType::Proxy)) continue;
+            auto it = batchStemToIdx.find(rec.name);
+            if (it == batchStemToIdx.end()) continue;
+            size_t bIdx = it->second;
+            std::memcpy(rec.data.data() + 6,  &batchOffset[bIdx],   8);
+            std::memcpy(rec.data.data() + 14, &batchByteSize[bIdx], 8);
+        }
+    };
+    patchProxies(rootRecords);
+    for (auto &batch : batchRecords) patchProxies(batch);
 
     // ── Assemble and write hierarchy.bin ──────────────────────────────────────
     std::vector<uint8_t> hierarchyBin;

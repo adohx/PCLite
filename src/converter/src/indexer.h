@@ -24,16 +24,16 @@
 class AttributeHandler;
 class ConcurrentWriter;
 
-// Holds the sampling output for one chunk root.
-// onNodeComplete for the chunk root is intentionally DEFERRED to mergeChunks
-// so the correct per-case handling can be applied:
-//   - global root (no parent):  write accepted + overflow (fold all back)
-//   - other chunk roots:        write accepted, return overflow as candidates
-//                               for the parent skeleton node.
+// Holds the sampling output for one chunk root: its "promotable" point set,
+// i.e. what indexChunk's bottom-up sampling decided to keep at the chunk
+// root's own level rather than settle back into one of its descendants.
+// onNodeComplete for the chunk root itself is intentionally DEFERRED to
+// mergeChunks, since whether it's the global root (write as-is) or sits
+// under a skeleton (gets tested again, possibly rejected back into) isn't
+// known until the skeleton is walked.
 struct ChunkRootRecord {
     Node *nodePtr = nullptr;
-    std::vector<uint8_t> accepted;   // points that passed doSample at chunkRoot
-    std::vector<uint8_t> overflow;   // points rejected by doSample (bubble up)
+    std::vector<uint8_t> promotable;
 };
 
 // Aggregates one or more ChunkRootRecords into a batch that can be loaded and
@@ -45,11 +45,16 @@ struct MergeTask {
 };
 
 // Sampling stage (3.3.3 / 3.3.4): builds a Morton-sorted local octree inside
-// each chunk, samples it bottom-up (writing to octree.bin and per-chunk
-// header.bin files), and saves overflow points to chunk_roots.bin.
-// mergeChunks then groups chunk roots into Tasks, loads their overflow points,
-// and samples the skeleton nodes above the chunk roots.
+// each chunk and samples it bottom-up (writing to octree.bin and per-chunk
+// header.bin files), recording each chunk root's promotable point set in
+// chunkRootRecords_. mergeChunks then samples the skeleton nodes above the
+// chunk roots, with each chunk root's promotable set as its candidate input.
 // rebuildIndex finally assembles the global hierarchy.bin.
+//
+// MergeTask/MergeNode/buildMergeTree/collapseToTasks/processTask below are
+// declared but currently unused — mergeChunks samples the whole skeleton in
+// one pass via sampleSkeleton rather than batching it into memory-bounded
+// Tasks.
 class Indexer {
 public:
     Indexer(Attributes attributes,
@@ -60,8 +65,9 @@ public:
             double rootSpacing);
 
     // Builds the Morton-sorted local octree for this chunk under chunkRoot,
-    // samples it bottom-up. The overflow (rejected from chunkRoot) is appended
-    // to "chunk_roots.bin" and recorded in chunkRootRecords_ (thread-safe).
+    // samples it bottom-up, and records chunkRoot's promotable point set in
+    // chunkRootRecords_ (thread-safe). chunkRoot itself is finalised later,
+    // by mergeChunks.
     bool indexChunk(const std::shared_ptr<Node> &chunkRoot, const ChunkInfo &chunk);
 
     // Groups the chunk roots (by total-point batching) into MergeTasks, loads
@@ -97,22 +103,30 @@ private:
                           bool allowRefinement,
                           std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints) const;
 
-    // Post-order traversal: collect candidates, call doSample, then
-    // onNodeComplete for every node EXCEPT the task root.
-    // For the task root (isTaskRoot=true), stores its accepted in
-    // *taskRootAccepted (if non-null) without calling onNodeComplete.
-    // Returns the rejected rows (overflow) for the caller.
-    std::vector<uint8_t> sampleBottomUp(const std::shared_ptr<Node> &node,
-                                         std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints,
-                                         bool isTaskRoot,
-                                         std::vector<uint8_t> *taskRootAccepted = nullptr) const;
+    // Post-order traversal matching PotreeConverter's bottom-up sampling
+    // direction: a structural leaf (no children) returns its pre-assigned
+    // points untouched, with no onNodeComplete call yet — that happens when
+    // its parent decides what to reject back into it. An internal node
+    // gathers each child's promotable set (recursively), samples at its own
+    // level, immediately finalises every child via onNodeComplete with
+    // whatever was rejected back to it, and returns its own accepted subset
+    // upward as ITS promotable set (to be tested again by its own parent).
+    // The node itself is never finalised here — that's always the caller's
+    // responsibility (mirroring how a node's final data is only known once
+    // its parent's accept/reject decision is made).
+    std::vector<uint8_t> sampleBottomUp(
+        const std::shared_ptr<Node> &node,
+        std::unordered_map<Node *, std::vector<uint8_t>> &nodePoints) const;
 
-    // Used by mergeChunks (general case). At stop nodes: calls onNodeComplete
-    // with the deferred accepted, returns overflow as candidates. At skeleton
-    // nodes: samples and calls onNodeComplete. isRoot folds rejected back in.
+    // Used by mergeChunks (general case). At stop nodes (chunk roots): returns
+    // the promotable set computed earlier by indexChunk, deferring
+    // finalisation to this node's own parent (same as sampleBottomUp).
+    // At skeleton nodes: same bottom-up gather/sample/finalise-children
+    // behaviour as sampleBottomUp. At the global root (isRoot=true), there's
+    // no parent to test the accepted set further, so it's written directly.
     std::vector<uint8_t> sampleSkeleton(
         const std::shared_ptr<Node> &node,
-        std::unordered_map<Node *, std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> &skeletonData,
+        std::unordered_map<Node *, std::vector<uint8_t>> &chunkRootPromotable,
         const std::unordered_set<Node *> &stopNodes,
         bool isRoot) const;
 

@@ -48,13 +48,18 @@ public:
     void onNodeComplete(const std::shared_ptr<Node> &node,
                         const std::vector<uint8_t> &accepted);
 
-    // Partition `candidates` into accepted (stay at this node) and rejected
-    // (bubble up to parent). Must be thread-safe.
+    // Partition `candidates` into accepted (promoted to this node, to be
+    // re-tested by its own parent) and rejected (settles back at whichever
+    // child contributed it). `acceptFlags` marks each candidate row 1 (in
+    // `accepted`) or 0 (in `rejected`), in original input order, so the
+    // caller can route rejected rows back to their originating child without
+    // having to re-run the spacing test itself. Must be thread-safe.
     virtual void doSample(const PointBatch &candidates,
                           const std::shared_ptr<Node> &node,
                           double spacing,
                           std::vector<uint8_t> &accepted,
-                          std::vector<uint8_t> &rejected) = 0;
+                          std::vector<uint8_t> &rejected,
+                          std::vector<uint8_t> &acceptFlags) = 0;
 
 protected:
     std::shared_ptr<ConcurrentWriter> writer_;
@@ -75,7 +80,7 @@ public:
 
     void doSample(const PointBatch &candidates, const std::shared_ptr<Node> &node,
                   double spacing, std::vector<uint8_t> &accepted,
-                  std::vector<uint8_t> &rejected) override;
+                  std::vector<uint8_t> &rejected, std::vector<uint8_t> &acceptFlags) override;
 };
 
 // Greedy Poisson-disk: a candidate is accepted if its position is at least
@@ -86,7 +91,7 @@ public:
 
     void doSample(const PointBatch &candidates, const std::shared_ptr<Node> &node,
                   double spacing, std::vector<uint8_t> &accepted,
-                  std::vector<uint8_t> &rejected) override;
+                  std::vector<uint8_t> &rejected, std::vector<uint8_t> &acceptFlags) override;
 };
 
 // Poisson-disk with flag-array + bulk-copy: maintains a Morton-sorted accepted
@@ -98,7 +103,7 @@ public:
 
     void doSample(const PointBatch &candidates, const std::shared_ptr<Node> &node,
                   double spacing, std::vector<uint8_t> &accepted,
-                  std::vector<uint8_t> &rejected) override;
+                  std::vector<uint8_t> &rejected, std::vector<uint8_t> &acceptFlags) override;
 };
 
 // Factory: "random" -> RandomSampler, "poisson_average" -> PoissonAverageSampler,

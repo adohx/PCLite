@@ -37,7 +37,7 @@ int Application::run() {
         return 1;
     }
 
-    return 0;
+    //return 0;
     auto loader = std::make_unique<PointCloudLoader>(outDir.string());
     auto root   = loader->loadRoot();
 

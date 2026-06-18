@@ -24,11 +24,16 @@ template <typename T>
 void writeAs(uint8_t *p, double value) {
     T v;
     if constexpr (std::is_integral_v<T>) {
-        double rounded = std::round(value);
-        rounded = std::clamp(rounded,
-                              static_cast<double>(std::numeric_limits<T>::lowest()),
-                              static_cast<double>(std::numeric_limits<T>::max()));
-        v = static_cast<T>(rounded);
+        // Truncate toward zero (matches PotreeConverter's `int32_t(value)` cast
+        // for position quantization), not round-to-nearest — otherwise our
+        // chunk output differs from the reference by +-1 unit on roughly half
+        // of all points, since std::round and a raw cast only agree below the
+        // 0.5 fractional threshold.
+        double truncated = std::trunc(value);
+        truncated = std::clamp(truncated,
+                                static_cast<double>(std::numeric_limits<T>::lowest()),
+                                static_cast<double>(std::numeric_limits<T>::max()));
+        v = static_cast<T>(truncated);
     } else {
         v = static_cast<T>(value);
     }
