@@ -27,7 +27,7 @@ bool Converter::run() {
     // streams now so Indexer's plain ifstream reads (in doSampling) see the
     // complete files.
     writer_->flushAll();
-
+    return true;
     if (!buildHierarchy()) return false;
     if (!doSampling()) return false;
     if (!doMerging()) return false;

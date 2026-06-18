@@ -12,6 +12,7 @@
 #include <fstream>
 #include <functional>
 #include <numeric>
+#include <string_view>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -306,14 +307,27 @@ bool Indexer::rebuildIndex() {
     fs::path chunksDir  = fs::path(targetDir_) / "chunks";
     fs::path rootHeader = chunksDir / "r.header.bin";
 
-    // Enumerate batch header files (stem length == stepSize+1).
+    // Enumerate batch header files: name is "<batchName>.header.bin" where
+    // batchName.size() == stepSize+1. path::stem() only strips the final
+    // ".bin", leaving ".header" attached (e.g. "r0020.header.bin" ->
+    // "r0020.header", 12 chars) so it can never match stepSize+1 directly —
+    // strip the full ".header.bin" suffix explicitly instead. Otherwise this
+    // both drops every real batch file (their nodes never reach hierarchy.bin)
+    // and misidentifies raw chunk point files (e.g. "r0060.bin", whose stem
+    // happens to be stepSize+1 chars) as batch headers, feeding raw point
+    // bytes through the named-record parser.
+    static constexpr std::string_view kHeaderSuffix = ".header.bin";
     std::vector<fs::path> batchFiles;
     if (fs::exists(chunksDir)) {
         for (const auto &e : fs::directory_iterator(chunksDir)) {
             if (!e.is_regular_file()) continue;
-            if (e.path().extension() != ".bin") continue;
-            std::string stem = e.path().stem().string();
-            if (static_cast<uint32_t>(stem.size()) == options_.stepSize + 1)
+            std::string filename = e.path().filename().string();
+            if (filename.size() <= kHeaderSuffix.size()) continue;
+            if (filename.compare(filename.size() - kHeaderSuffix.size(),
+                                  kHeaderSuffix.size(), kHeaderSuffix) != 0)
+                continue;
+            std::string batchName = filename.substr(0, filename.size() - kHeaderSuffix.size());
+            if (static_cast<uint32_t>(batchName.size()) == options_.stepSize + 1)
                 batchFiles.push_back(e.path());
         }
         std::sort(batchFiles.begin(), batchFiles.end());
@@ -362,9 +376,33 @@ bool Indexer::rebuildIndex() {
         return a.name < b.name;
     };
 
-    // Parse and sort root section.
+    // Parse root section.
     auto rootRaw = readFile(rootHeader);
     auto rootRecords = parseNamedSection(rootRaw);
+
+    // A root-group node at name.size() == stepSize has children whose names
+    // reach stepSize+1, which headerPath() routes to a separate batch file —
+    // those children have no record in this chunk even though childMask says
+    // they exist. The viewer's BFS-positional parser (loadHierarchyChunk)
+    // needs a record at that position to know to lazily fetch the batch
+    // chunk, so insert a placeholder Proxy record per such child; the patch
+    // step below fills in its real address/size once batch offsets are known.
+    {
+        std::vector<NamedRecord> proxyPlaceholders;
+        for (const auto &rec : rootRecords) {
+            if (rec.name.size() != options_.stepSize) continue;
+            uint8_t mask = rec.data[1];
+            for (int c = 0; c < 8; ++c) {
+                if (!((mask >> c) & 1)) continue;
+                NamedRecord proxy;
+                proxy.name = rec.name + std::to_string(c);
+                proxy.data.fill(0);
+                proxy.data[0] = static_cast<uint8_t>(NodeType::Proxy);
+                proxyPlaceholders.push_back(std::move(proxy));
+            }
+        }
+        rootRecords.insert(rootRecords.end(), proxyPlaceholders.begin(), proxyPlaceholders.end());
+    }
     std::sort(rootRecords.begin(), rootRecords.end(), bfsLess);
 
     // Parse and sort each batch section.
@@ -389,9 +427,15 @@ bool Indexer::rebuildIndex() {
     }
 
     // ── Build name→batch index map for Proxy patching ─────────────────────────
+    // path::stem() only strips the trailing ".bin", leaving ".header"
+    // attached (e.g. "r0020.header.bin".stem() == "r0020.header") — strip
+    // the full ".header.bin" suffix explicitly, same as the batchFiles scan
+    // above, so this actually matches the 5-char proxy record names.
     std::unordered_map<std::string, size_t> batchStemToIdx;
-    for (size_t i = 0; i < batchFiles.size(); ++i)
-        batchStemToIdx[batchFiles[i].stem().string()] = i;
+    for (size_t i = 0; i < batchFiles.size(); ++i) {
+        std::string filename = batchFiles[i].filename().string();
+        batchStemToIdx[filename.substr(0, filename.size() - kHeaderSuffix.size())] = i;
+    }
 
     // ── Patch Proxy records in root section ───────────────────────────────────
     // Proxy records mark batch-group boundaries; fill in the final offset+size.

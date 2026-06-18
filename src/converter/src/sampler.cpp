@@ -7,8 +7,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <unordered_map>
-
 #include "attribute_handler/attribute_handler.h"
 #include "attribute_handler/attribute_handler_registry.h"
 #include "concurrent_writer.h"
@@ -43,28 +41,6 @@ std::string headerPath(const std::string &nodeName, uint32_t stepSize) {
         return "chunks/r.header.bin";
     }
     return "chunks/" + nodeName.substr(0, stepSize + 1) + ".header.bin";
-}
-
-struct CellKey {
-    int64_t x, y, z;
-    bool operator==(const CellKey &o) const { return x == o.x && y == o.y && z == o.z; }
-};
-
-struct CellKeyHash {
-    size_t operator()(const CellKey &k) const {
-        size_t h = std::hash<int64_t>()(k.x);
-        h ^= std::hash<int64_t>()(k.y) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        h ^= std::hash<int64_t>()(k.z) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        return h;
-    }
-};
-
-CellKey cellKeyOf(const vec3d &p, const vec3d &origin, double spacing) {
-    return {
-        static_cast<int64_t>(std::floor((p.x - origin.x) / spacing)),
-        static_cast<int64_t>(std::floor((p.y - origin.y) / spacing)),
-        static_cast<int64_t>(std::floor((p.z - origin.z) / spacing)),
-    };
 }
 
 } // namespace
@@ -142,55 +118,93 @@ void RandomSampler::doSample(const PointBatch &candidates,
 // ── PoissonDiskSampler ────────────────────────────────────────────────────────
 
 void PoissonDiskSampler::doSample(const PointBatch &candidates,
-                                   const std::shared_ptr<Node> & /*node*/,
+                                   const std::shared_ptr<Node> &node,
                                    double spacing,
                                    std::vector<uint8_t> &accepted,
                                    std::vector<uint8_t> &rejected) {
     accepted.clear();
     rejected.clear();
-    if (candidates.numPoints == 0) return;
+    const uint64_t n = candidates.numPoints;
+    if (n == 0) return;
 
-    if (spacing <= 0.0) {
-        accepted.assign(candidates.data,
-                        candidates.data + candidates.numPoints * candidates.rowStride);
+    if (spacing <= 0.0 || !posHandler_) {
+        accepted.assign(candidates.data, candidates.data + n * candidates.rowStride);
         return;
     }
 
-    if (!posHandler_) {
-        accepted.assign(candidates.data,
-                        candidates.data + candidates.numPoints * candidates.rowStride);
-        return;
+    struct Point { double x, y, z; uint64_t idx; };
+
+    // Decode all positions.
+    std::vector<Point> points(n);
+    for (uint64_t i = 0; i < n; ++i) {
+        double pos[3] = {};
+        posHandler_->decode(candidates.data + i * candidates.rowStride + posOffset_, posAttr_, pos);
+        points[i] = {pos[0], pos[1], pos[2], i};
     }
+
+    // Sort candidates by distance to node center (closest first).
+    // Accepted points are appended in this order, so acceptedBuf stays sorted
+    // by center-distance — enabling the early-stop below.
+    const vec3d bbMin = node->bb_.min();
+    const vec3d bbMax = node->bb_.max();
+    const double cx = (bbMin.x + bbMax.x) * 0.5;
+    const double cy = (bbMin.y + bbMax.y) * 0.5;
+    const double cz = (bbMin.z + bbMax.z) * 0.5;
+
+    std::sort(points.begin(), points.end(), [cx, cy, cz](const Point &a, const Point &b) {
+        double adx = a.x - cx, ady = a.y - cy, adz = a.z - cz;
+        double bdx = b.x - cx, bdy = b.y - cy, bdz = b.z - cz;
+        return (adx*adx + ady*ady + adz*adz) < (bdx*bdx + bdy*bdy + bdz*bdz);
+    });
+
+    // Greedy accept/reject: each thread keeps its own accepted buffer so
+    // doSample stays stateless across concurrent calls.
+    thread_local std::vector<Point> acceptedBuf;
+    acceptedBuf.clear();
+    if (acceptedBuf.capacity() < n) acceptedBuf.reserve(n);
 
     const double spacingSq = spacing * spacing;
-    std::unordered_map<CellKey, std::vector<vec3d>, CellKeyHash> grid;
+    std::vector<bool> flags(n, false);
 
-    for (uint64_t i = 0; i < candidates.numPoints; ++i) {
-        const uint8_t *row = candidates.data + i * candidates.rowStride;
-        double pos[3] = {};
-        posHandler_->decode(row + posOffset_, posAttr_, pos);
-        vec3d p{pos[0], pos[1], pos[2]};
+    for (const Point &cand : points) {
+        double dx = cand.x - cx, dy = cand.y - cy, dz = cand.z - cz;
+        double candDistSq = dx*dx + dy*dy + dz*dz;
+        double candDist   = std::sqrt(candDistSq);
 
-        CellKey key = cellKeyOf(p, {0, 0, 0}, spacing);
+        // An accepted point closer to center than (candDist - spacing) is
+        // guaranteed to be at least `spacing` away from cand (reverse triangle
+        // inequality). Since acceptedBuf is sorted closest-first, once we hit
+        // such a point while iterating backwards we can stop.
+        double limit   = candDist - spacing;
+        double limitSq = limit * limit;
 
-        bool tooClose = false;
-        for (int dx = -1; dx <= 1 && !tooClose; ++dx)
-            for (int dy = -1; dy <= 1 && !tooClose; ++dy)
-                for (int dz = -1; dz <= 1 && !tooClose; ++dz) {
-                    auto it = grid.find({key.x + dx, key.y + dy, key.z + dz});
-                    if (it == grid.end()) continue;
-                    for (const vec3d &q : it->second) {
-                        double dx2 = p.x - q.x, dy2 = p.y - q.y, dz2 = p.z - q.z;
-                        if (dx2*dx2 + dy2*dy2 + dz2*dz2 < spacingSq) { tooClose = true; break; }
-                    }
-                }
+        bool accept = true;
+        int64_t checks = 0;
+        for (int64_t i = static_cast<int64_t>(acceptedBuf.size()) - 1; i >= 0; --i) {
+            const Point &p = acceptedBuf[i];
 
-        if (tooClose)
-            rejected.insert(rejected.end(), row, row + candidates.rowStride);
-        else {
-            grid[key].push_back(p);
-            accepted.insert(accepted.end(), row, row + candidates.rowStride);
+            double pdx = p.x - cx, pdy = p.y - cy, pdz = p.z - cz;
+            double pDistSq = pdx*pdx + pdy*pdy + pdz*pdz;
+            if (pDistSq < limitSq) break;  // no closer accepted point can conflict
+
+            double ddx = cand.x - p.x, ddy = cand.y - p.y, ddz = cand.z - p.z;
+            if (ddx*ddx + ddy*ddy + ddz*ddz < spacingSq) { accept = false; break; }
+
+            if (++checks > 10'000) break;
         }
+
+        flags[cand.idx] = accept;
+        if (accept) acceptedBuf.push_back(cand);
+    }
+
+    // Single-pass bulk copy into output vectors.
+    const uint64_t stride = candidates.rowStride;
+    for (uint64_t i = 0; i < n; ++i) {
+        const uint8_t *row = candidates.data + i * stride;
+        if (flags[i])
+            accepted.insert(accepted.end(), row, row + stride);
+        else
+            rejected.insert(rejected.end(), row, row + stride);
     }
 }
 

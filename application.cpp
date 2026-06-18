@@ -10,7 +10,7 @@
 #include "camera/perspective_camera.h"
 #include "camera/arcball_controller.h"
 #include "layer/point_cloud_layer.h"
-#include "node_management/all_nodes_strategy.h"
+#include "node_management/sse_lru_strategy.h"
 #include "node_loader/point_cloud_loader.h"
 #include "painter/node_painter.h"
 #include "painter/bounding_box_painter.h"
@@ -37,6 +37,7 @@ int Application::run() {
         return 1;
     }
 
+    return 0;
     auto loader = std::make_unique<PointCloudLoader>(outDir.string());
     auto root   = loader->loadRoot();
 
@@ -50,10 +51,15 @@ int Application::run() {
     fprintf(stderr, "BBox: [%.2f %.2f %.2f] - [%.2f %.2f %.2f]  span=%.1fm\n",
             bbMin.x, bbMin.y, bbMin.z, bbMax.x, bbMax.y, bbMax.z, span);
 
-    auto layer = std::make_unique<PointCloudLayer>();
-    auto& mgr  = layer->nodeManager();
+    auto layer    = std::make_unique<PointCloudLayer>();
+    auto strategy = std::make_unique<SSELruStrategy>(/*screenHeight=*/768,
+                                                        /*sseThreshold=*/1.0f,
+                                                        /*maxLoadedNodes=*/1000);
+    strategy->setNodeLoader(loader.get());
+
+    auto& mgr = layer->nodeManager();
     mgr.addTree(root);
-    mgr.addStrategy(std::make_unique<AllNodesStrategy>());
+    mgr.addStrategy(std::move(strategy));
     mgr.addPainter(std::make_unique<NodePainter>(loader->attributes()));
     mgr.addPainter(std::make_unique<BoundingBoxPainter>());
     mgr.addPainter(std::make_unique<AxisPainter>());
@@ -71,7 +77,7 @@ int Application::run() {
     auto controller = std::make_unique<ArcballController>();
     controller->syncFromCamera(*camera);
 
-    SDLWindow window(1024, 768, "PCLite — " + lasPath_);
+    SDLWindow window(1024, 768, "PCLite - " + lasPath_);
     window.addLayer(std::move(layer));
     window.addCamera(std::move(camera));
     window.setController(std::move(controller));
