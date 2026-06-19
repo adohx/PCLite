@@ -6,7 +6,7 @@
 #include <memory>
 
 #include "converter.h"
-#include "window/sdl_window.h"
+#include "window/main_window.h"
 #include "camera/perspective_camera.h"
 #include "camera/arcball_controller.h"
 #include "layer/point_cloud_layer.h"
@@ -77,10 +77,10 @@ int Application::run() {
     auto controller = std::make_unique<ArcballController>();
     controller->syncFromCamera(*camera);
 
-    SDLWindow window(1024, 768, "PCLite - " + lasPath_);
-    window.addLayer(std::move(layer));
-    window.addCamera(std::move(camera));
-    window.setController(std::move(controller));
+    MainWindow window(1280, 800, "PCLite - " + lasPath_);
+    window.viewport().addLayer(std::move(layer));
+    window.viewport().addCamera(std::move(camera));
+    window.viewport().setController(std::move(controller));
     window.run();
 
     fs::remove_all(outDir);

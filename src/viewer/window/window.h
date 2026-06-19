@@ -17,10 +17,6 @@ public:
     // then composites their outputs into a single frame.
     virtual void render() = 0;
 
-    virtual void onMouseMove(float x, float y) {}
-    virtual void onMouseButton(float x, float y, int button, bool pressed) {}
-    virtual void onMouseScroll(float delta) {}
-    virtual void onKeyEvent(int key, bool pressed) {}
     virtual void onResize(int width, int height);
 
     int width() const;

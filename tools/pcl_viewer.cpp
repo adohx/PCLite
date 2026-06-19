@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <memory>
 
-#include "window/sdl_window.h"
+#include "window/main_window.h"
 #include "camera/perspective_camera.h"
 #include "camera/arcball_controller.h"
 #include "layer/point_cloud_layer.h"
@@ -15,6 +15,9 @@
 #include "painter/bounding_box_painter.h"
 #include "painter/axis_painter.h"
 #include "../src/core/node.h"
+
+#include "imgui.h"
+#include <SDL2/SDL_opengl.h>
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -62,10 +65,17 @@ int main(int argc, char** argv) {
     auto controller = std::make_unique<ArcballController>();
     controller->syncFromCamera(*camera);
 
-    SDLWindow window(800, 600, "PCLite Viewer");
-    window.addLayer(std::move(layer));
-    window.addCamera(std::move(camera));
-    window.setController(std::move(controller));
+    MainWindow window(1280, 800, "PCLite Viewer");
+    window.viewport().addLayer(std::move(layer));
+    window.viewport().addCamera(std::move(camera));
+    window.viewport().setController(std::move(controller));
+
+    static float pointSize = 2.f;
+    window.setPropertiesCallback([] {
+        if (ImGui::SliderFloat("Point size", &pointSize, 1.f, 10.f))
+            glPointSize(pointSize);
+    });
+
     window.run();
 
     return 0;

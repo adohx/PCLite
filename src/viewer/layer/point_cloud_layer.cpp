@@ -2,5 +2,5 @@
 #include "node_management/node_manager.h"
 
 void PointCloudLayer::render() {
-    // render is driven by SDLWindow via nodeManager().render(viewMatrix)
+    // render is driven by Viewport via nodeManager().render(viewMatrix)
 }
