@@ -3,8 +3,8 @@
 
 #include <memory>
 #include <vector>
-#include "camera/camera.h"
-#include "layer/layer.h"
+#include "../viewer/camera/camera.h"
+#include "../viewer/layer/layer.h"
 
 class Window {
 public:

@@ -30,6 +30,7 @@ int Application::run() {
     fs::remove_all(outDir);
     fs::create_directories(outDir);
 
+
     fprintf(stderr, "Converting %s ...\n", lasPath_.c_str());
     if (!Converter({lasPath_}, outDir.string()).run()) {
         fprintf(stderr, "Conversion failed.\n");
