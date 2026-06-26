@@ -81,16 +81,31 @@ private:
     float pressX_        = 0.f;
     float pressY_        = 0.f;
 
+    // Latest hover position waiting to be processed in update() (at most
+    // once per frame, however many onMouseMove events arrived); not set
+    // while dragging the camera, so hover preview pauses during orbit/pan.
+    float hoverX_       = 0.f;
+    float hoverY_       = 0.f;
+    bool  hoverPending_ = false;
+
     PickResult lastPick_;
 
     // Pick-assist plane fit (the ring indicator): computed in two passes.
-    // pick() does an immediate fit from whatever's currently resident
-    // (cheap, in-memory only, but precision follows the current LOD); a
-    // background task then descends to the actual full-resolution leaf
-    // node under the cursor and refines the result a frame or two later.
-    // See [[project_point_picking]] for why two passes instead of one.
+    // resolvePick() does an immediate fit from whatever's currently
+    // resident (cheap, in-memory only, but precision follows the current
+    // LOD); a background task then descends to the actual full-resolution
+    // leaf node under the cursor and refines the result shortly after,
+    // applied whenever it completes. See [[project_point_picking]] for why
+    // two passes instead of one.
+    //
+    // Used for both click-to-pick and hover preview (real-time, updates as
+    // the mouse moves): a click launches the background refinement right
+    // away; hover launches it only after resting on the same point for
+    // kHoverRefineDelay, so sweeping the mouse across many points doesn't
+    // flood the refinement thread with disk reads for positions the user
+    // has already moved past.
     struct PendingRefinement {
-        uint64_t generation = 0; // discarded if a newer pick() happened meanwhile
+        uint64_t generation = 0; // discarded if a newer pick superseded this one
         bool valid = false;
         Layer* layer = nullptr;
         vec3f center{}, normal{};
@@ -102,16 +117,40 @@ private:
     PCLiteThreadPool refinementPool_{1};
     PointCloudLoader* pickAssistLoader_ = nullptr;
 
+    // Set by resolvePick() whenever the resolved point actually changes;
+    // tracks whether a background refinement has already been launched for
+    // whatever's currently displayed, and how long the same point has been
+    // continuously hovered (for the settle-before-refining debounce).
+    Layer* currentHitLayer_                  = nullptr;
+    float  currentSearchRadius_              = 0.f;
+    bool   refinementLaunchedForCurrentPick_ = false;
+    float  hoverSettleTimer_                 = 0.f;
+
     void resizeFBO(int w, int h);
     void destroyFBO();
 
-    // Renders a small window around (x, y) into pickFbo_ and reads back
-    // the nearest non-empty pixel, updating lastPick_ and the highlighted
-    // point on every layer.
+    // Shared core for both pick() and previewAt(): renders a small window
+    // around (x, y) into pickFbo_, reads back the nearest non-empty pixel,
+    // and -- only if the resolved point differs from lastPick_ -- updates
+    // lastPick_, the highlight, and the immediate plane fit on every layer.
+    // Returns the hit layer (nullptr if no hit), via outRadius the search
+    // radius used for the immediate fit.
+    Layer* resolvePick(float x, float y, float& outRadius);
+
+    // Click path: resolvePick() + launch background refinement immediately.
     void pick(float x, float y);
 
+    // Hover path: resolvePick() only; background refinement (if any) is
+    // launched later from update() once the point has settled.
+    void previewAt(float x, float y);
+
+    // Launches the background leaf-descent refinement task for `position`
+    // on `layer`, tagged with `generation` so a later, now-stale result
+    // gets discarded by applyPendingRefinement().
+    void launchRefinement(Layer* layer, const vec3f& position, float radius, uint64_t generation);
+
     // Applies pendingRefinement_ if it has finished and is still relevant
-    // (i.e. no newer pick() happened since it was launched). Called once
+    // (i.e. no newer pick superseded it since it was launched). Called once
     // per frame from update().
     void applyPendingRefinement();
 };

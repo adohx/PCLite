@@ -29,6 +29,11 @@ static constexpr int kPickRadius = 4;
 // normal is too noisy to be worth showing.
 static constexpr size_t kMinPlaneFitPoints = 6;
 
+// Hover must rest on the same point for this long before its background
+// refinement fires, so sweeping the mouse across many points doesn't queue
+// a disk read for every position passed over (see Viewport::update()).
+static constexpr float kHoverRefineDelay = 0.15f;
+
 namespace {
 // Gathers radius-search hits across `nodes`' own KD-trees (each one only
 // knows about its own points -- this is the cross-node merge) and fits a
@@ -60,6 +65,24 @@ void Viewport::setController(std::unique_ptr<CameraController> controller) {
 
 void Viewport::update(float dt) {
     applyPendingRefinement();
+
+    if (hoverPending_ && !leftDragging_ && !rightDragging_) {
+        hoverPending_ = false;
+        previewAt(hoverX_, hoverY_);
+    }
+
+    // Debounced background refinement: fires once the currently-displayed
+    // pick (whether from a hover or a click) has stood for kHoverRefineDelay
+    // without being superseded. A click already launches its own refinement
+    // immediately in pick(), which sets refinementLaunchedForCurrentPick_ so
+    // this just no-ops for it.
+    if (lastPick_.hit && currentHitLayer_ && pickAssistLoader_ && !refinementLaunchedForCurrentPick_) {
+        hoverSettleTimer_ += dt;
+        if (hoverSettleTimer_ >= kHoverRefineDelay) {
+            launchRefinement(currentHitLayer_, lastPick_.position, currentSearchRadius_, pickGeneration_);
+            refinementLaunchedForCurrentPick_ = true;
+        }
+    }
 
     if (!controller_) return;
     controller_->update(dt);
@@ -108,6 +131,10 @@ void Viewport::onMouseMove(float x, float y) {
         float dy = y - lastMouseY_;
         if (leftDragging_)  controller_->onMouseDrag(kLeftButton,  dx, dy);
         if (rightDragging_) controller_->onMouseDrag(kRightButton, dx, dy);
+    } else {
+        hoverX_ = x;
+        hoverY_ = y;
+        hoverPending_ = true;
     }
     lastMouseX_ = x;
     lastMouseY_ = y;
@@ -184,90 +211,107 @@ void Viewport::destroyFBO() {
     if (pickFbo_)                { glDeleteFramebuffers(1, &pickFbo_); pickFbo_ = 0; }
 }
 
-void Viewport::pick(float x, float y) {
-    if (pickFbo_ == 0 || cameras_.empty() || layers_.empty()) return;
-
-    int cx = (int)x;
-    int cy = fboHeight_ - 1 - (int)y; // GL texture rows are bottom-up; mouse y is top-down
-    int x0 = std::max(0, cx - kPickRadius);
-    int y0 = std::max(0, cy - kPickRadius);
-    int x1 = std::min(fboWidth_  - 1, cx + kPickRadius);
-    int y1 = std::min(fboHeight_ - 1, cy + kPickRadius);
-    int w = x1 - x0 + 1, h = y1 - y0 + 1;
-    if (w <= 0 || h <= 0) return;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, pickFbo_);
-    glViewport(0, 0, fboWidth_, fboHeight_);
-
-    GLuint clearId[2] = {0u, 0u}; // nodeId 0 is the "no hit" sentinel
-    glClearBufferuiv(GL_COLOR, 0, clearId);
-    glClear(GL_DEPTH_BUFFER_BIT);
-
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(x0, y0, w, h);
-
-    auto& cam = *cameras_[0];
-    Mat4f projMatrix = cam.projectionMatrix();
-    Mat4f viewMatrix = cam.viewMatrix();
-    for (auto& layer : layers_)
-        layer->nodeManager().renderPick(viewMatrix, projMatrix);
-
-    glDisable(GL_SCISSOR_TEST);
-
-    std::vector<uint32_t> pixels((size_t)w * h * 2);
-    glReadPixels(x0, y0, w, h, GL_RG_INTEGER, GL_UNSIGNED_INT, pixels.data());
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+Layer* Viewport::resolvePick(float x, float y, float& outRadius) {
+    outRadius = currentSearchRadius_;
+    if (pickFbo_ == 0 || cameras_.empty() || layers_.empty()) return currentHitLayer_;
 
     uint32_t bestNodeId = 0, bestPointIndex = 0;
-    int bestDistSq = -1;
-    for (int j = 0; j < h; ++j) {
-        for (int i = 0; i < w; ++i) {
-            uint32_t nodeId = pixels[((size_t)j * w + i) * 2 + 0];
-            if (nodeId == 0) continue;
-            int dx = (x0 + i) - cx, dy = (y0 + j) - cy;
-            int distSq = dx * dx + dy * dy;
-            if (bestDistSq < 0 || distSq < bestDistSq) {
-                bestDistSq = distSq;
-                bestNodeId = nodeId;
-                bestPointIndex = pixels[((size_t)j * w + i) * 2 + 1];
+    bool inBounds = x >= 0.f && y >= 0.f && x < static_cast<float>(width_) && y < static_cast<float>(height_);
+
+    if (inBounds) {
+        int cx = (int)x;
+        int cy = fboHeight_ - 1 - (int)y; // GL texture rows are bottom-up; mouse y is top-down
+        int x0 = std::max(0, cx - kPickRadius);
+        int y0 = std::max(0, cy - kPickRadius);
+        int x1 = std::min(fboWidth_  - 1, cx + kPickRadius);
+        int y1 = std::min(fboHeight_ - 1, cy + kPickRadius);
+        int w = x1 - x0 + 1, h = y1 - y0 + 1;
+
+        if (w > 0 && h > 0) {
+            glBindFramebuffer(GL_FRAMEBUFFER, pickFbo_);
+            glViewport(0, 0, fboWidth_, fboHeight_);
+
+            GLuint clearId[2] = {0u, 0u}; // nodeId 0 is the "no hit" sentinel
+            glClearBufferuiv(GL_COLOR, 0, clearId);
+            glClear(GL_DEPTH_BUFFER_BIT);
+
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(x0, y0, w, h);
+
+            auto& cam = *cameras_[0];
+            Mat4f projMatrix = cam.projectionMatrix();
+            Mat4f viewMatrix = cam.viewMatrix();
+            for (auto& layer : layers_)
+                layer->nodeManager().renderPick(viewMatrix, projMatrix);
+
+            glDisable(GL_SCISSOR_TEST);
+
+            std::vector<uint32_t> pixels((size_t)w * h * 2);
+            glReadPixels(x0, y0, w, h, GL_RG_INTEGER, GL_UNSIGNED_INT, pixels.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+            int bestDistSq = -1;
+            for (int j = 0; j < h; ++j) {
+                for (int i = 0; i < w; ++i) {
+                    uint32_t nodeId = pixels[((size_t)j * w + i) * 2 + 0];
+                    if (nodeId == 0) continue;
+                    int dx = (x0 + i) - cx, dy = (y0 + j) - cy;
+                    int distSq = dx * dx + dy * dy;
+                    if (bestDistSq < 0 || distSq < bestDistSq) {
+                        bestDistSq = distSq;
+                        bestNodeId = nodeId;
+                        bestPointIndex = pixels[((size_t)j * w + i) * 2 + 1];
+                    }
+                }
             }
         }
     }
 
-    lastPick_ = PickResult{};
-    Layer* hitLayer = nullptr;
+    Node* newNode = nullptr;
+    int newPointIndex = -1;
+    vec3f newPosition{};
+    Layer* newHitLayer = nullptr;
+
     if (bestNodeId != 0) {
         for (auto& layer : layers_) {
             Node* node = layer->nodeManager().nodeForId(bestNodeId);
             if (!node) continue;
             auto points = node->getPoints();
             if ((size_t)bestPointIndex < points.size()) {
-                lastPick_.hit        = true;
-                lastPick_.node       = node;
-                lastPick_.pointIndex = (int)bestPointIndex;
-                lastPick_.position   = points[bestPointIndex];
-                hitLayer = layer.get();
+                newNode        = node;
+                newPointIndex  = (int)bestPointIndex;
+                newPosition    = points[bestPointIndex];
+                newHitLayer    = layer.get();
             }
             break;
         }
     }
 
+    bool changed = (newNode != lastPick_.node) || (newPointIndex != lastPick_.pointIndex);
+
+    lastPick_.hit        = (newNode != nullptr);
+    lastPick_.node       = newNode;
+    lastPick_.pointIndex = newPointIndex;
+    lastPick_.position   = newPosition;
+
+    if (!changed) return currentHitLayer_;
+
+    // The resolved point actually changed: recompute highlight + immediate
+    // fit, and reset the settle/refinement bookkeeping for the new pick.
+    ++pickGeneration_;
+    hoverSettleTimer_ = 0.f;
+    refinementLaunchedForCurrentPick_ = false;
+
     for (auto& layer : layers_)
         layer->nodeManager().setHighlight(lastPick_.node, lastPick_.pointIndex);
-
-    // Pick-assist plane fit, pass 1 (immediate): cross-node merge over
-    // whatever's currently resident. Cheap (in-memory only) but precision
-    // follows the current LOD -- see [[project_point_picking]].
-    ++pickGeneration_;
-    uint64_t generation = pickGeneration_;
 
     bool planeOk = false;
     vec3f planeCenter{}, planeNormal{};
     float searchRadius = 0.f;
 
-    if (lastPick_.hit && hitLayer) {
+    if (lastPick_.hit && newHitLayer) {
         searchRadius = std::max(static_cast<float>(lastPick_.node->spacing_ * 4.0), 1e-3f);
-        auto candidates = hitLayer->nodeManager().nodesNear(
+        auto candidates = newHitLayer->nodeManager().nodesNear(
             vec3d{static_cast<double>(lastPick_.position.x),
                   static_cast<double>(lastPick_.position.y),
                   static_cast<double>(lastPick_.position.z)},
@@ -276,46 +320,64 @@ void Viewport::pick(float x, float y) {
     }
 
     for (auto& layer : layers_) {
-        bool isHitLayer = (layer.get() == hitLayer);
+        bool isHitLayer = (layer.get() == newHitLayer);
         layer->nodeManager().setPlaneFit(isHitLayer && planeOk, planeCenter, planeNormal, searchRadius);
     }
 
-    // Pick-assist plane fit, pass 2 (background refinement): descend to the
-    // actual full-resolution leaf under the cursor regardless of current
-    // LOD, off the main thread, and apply it next frame if still relevant.
-    // queryFinestLeafAt never touches any live Node, so this can't race the
-    // main thread's ordinary LRU-driven loading.
-    if (lastPick_.hit && hitLayer && pickAssistLoader_) {
-        PointCloudLoader* loader = pickAssistLoader_;
-        Layer* layerPtr = hitLayer;
-        vec3f queryPos = lastPick_.position;
-        float radius = searchRadius;
+    currentHitLayer_     = newHitLayer;
+    currentSearchRadius_ = searchRadius;
+    outRadius = searchRadius;
+    return newHitLayer;
+}
 
-        pendingRefinement_ = refinementPool_.enqueue([loader, layerPtr, queryPos, radius, generation]() {
-            PendingRefinement result;
-            result.generation = generation;
+void Viewport::launchRefinement(Layer* layer, const vec3f& position, float radius, uint64_t generation) {
+    if (!pickAssistLoader_) return;
+    PointCloudLoader* loader = pickAssistLoader_;
 
-            vec3d worldPoint{static_cast<double>(queryPos.x),
-                              static_cast<double>(queryPos.y),
-                              static_cast<double>(queryPos.z)};
-            auto leaf = loader->queryFinestLeafAt(worldPoint);
-            if (!leaf.found) return result;
+    // Descends to the actual full-resolution leaf under the cursor
+    // regardless of current LOD, off the main thread, applied whenever it
+    // completes if still relevant. queryFinestLeafAt never touches any
+    // live Node, so this can't race the main thread's ordinary LRU-driven
+    // loading -- see [[project_point_picking]].
+    pendingRefinement_ = refinementPool_.enqueue([loader, layer, position, radius, generation]() {
+        PendingRefinement result;
+        result.generation = generation;
 
-            auto idxs = leaf.kdTree.radiusSearch(queryPos, radius);
-            std::vector<vec3f> neighbors;
-            neighbors.reserve(idxs.size());
-            for (uint32_t idx : idxs)
-                if (idx < leaf.points.size()) neighbors.push_back(leaf.points[idx]);
+        vec3d worldPoint{static_cast<double>(position.x),
+                          static_cast<double>(position.y),
+                          static_cast<double>(position.z)};
+        auto leaf = loader->queryFinestLeafAt(worldPoint);
+        if (!leaf.found) return result;
 
-            if (neighbors.size() >= kMinPlaneFitPoints &&
-                fitPlane(neighbors, result.center, result.normal)) {
-                result.valid  = true;
-                result.layer  = layerPtr;
-                result.radius = radius;
-            }
-            return result;
-        });
+        auto idxs = leaf.kdTree.radiusSearch(position, radius);
+        std::vector<vec3f> neighbors;
+        neighbors.reserve(idxs.size());
+        for (uint32_t idx : idxs)
+            if (idx < leaf.points.size()) neighbors.push_back(leaf.points[idx]);
+
+        if (neighbors.size() >= kMinPlaneFitPoints &&
+            fitPlane(neighbors, result.center, result.normal)) {
+            result.valid  = true;
+            result.layer  = layer;
+            result.radius = radius;
+        }
+        return result;
+    });
+}
+
+void Viewport::pick(float x, float y) {
+    float radius = 0.f;
+    Layer* hitLayer = resolvePick(x, y, radius);
+
+    if (lastPick_.hit && hitLayer && !refinementLaunchedForCurrentPick_) {
+        launchRefinement(hitLayer, lastPick_.position, radius, pickGeneration_);
+        refinementLaunchedForCurrentPick_ = true;
     }
+}
+
+void Viewport::previewAt(float x, float y) {
+    float radius = 0.f;
+    resolvePick(x, y, radius);
 }
 
 void Viewport::render() {
