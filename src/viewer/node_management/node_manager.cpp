@@ -78,3 +78,20 @@ void NodeManager::render(const Mat4f& viewMatrix, const Mat4f& projMatrix) {
     for (auto& painter : d_->painters_)
         painter->paint(viewMatrix, projMatrix);
 }
+
+void NodeManager::renderPick(const Mat4f& viewMatrix, const Mat4f& projMatrix) {
+    for (auto& painter : d_->painters_)
+        painter->paintPick(viewMatrix, projMatrix);
+}
+
+Node* NodeManager::nodeForId(uint32_t id) const {
+    for (auto& painter : d_->painters_)
+        if (Node* node = painter->nodeForId(id))
+            return node;
+    return nullptr;
+}
+
+void NodeManager::setHighlight(Node* node, int pointIndex) {
+    for (auto& painter : d_->painters_)
+        painter->setHighlight(node, pointIndex);
+}

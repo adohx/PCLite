@@ -6,7 +6,8 @@
 
 NodePainter::NodePainter(Attributes attributes)
     : attributes_(std::move(attributes)),
-      shader_(kBasicColorVertexSrc, kBasicColorFragmentSrc) {}
+      shader_(kPointCloudVertexSrc, kPointCloudFragmentSrc),
+      pickShader_(kPickVertexSrc, kPickFragmentSrc) {}
 
 NodePainter::~NodePainter() {
     for (auto& [node, batch] : batches_) destroyBatch(batch);
@@ -67,22 +68,55 @@ void NodePainter::destroyBatch(Batch& batch) {
 }
 
 void NodePainter::addNode(Node* node) {
-    batches_[node] = createBatch(node);
+    Batch batch = createBatch(node);
+    batch.id = nextNodeId_++;
+    idToNode_[batch.id] = node;
+    batches_[node] = batch;
 }
 
 void NodePainter::removeNode(Node* node) {
     auto it = batches_.find(node);
     if (it == batches_.end()) return;
+    if (highlightNode_ == node) setHighlight(nullptr, -1);
+    idToNode_.erase(it->second.id);
     destroyBatch(it->second);
     batches_.erase(it);
 }
 
+Node* NodePainter::nodeForId(uint32_t nodeId) const {
+    auto it = idToNode_.find(nodeId);
+    return it == idToNode_.end() ? nullptr : it->second;
+}
+
+void NodePainter::setHighlight(Node* node, int pointIndex) {
+    highlightNode_ = node;
+    highlightIndex_ = node ? pointIndex : -1;
+}
+
 void NodePainter::paint(const Mat4f& viewMatrix, const Mat4f& projMatrix) {
+    glEnable(GL_PROGRAM_POINT_SIZE); // lets the vertex shader drive gl_PointSize for the highlighted point
+
     shader_.use();
     shader_.setMat4("uMVP", projMatrix * viewMatrix);
 
     for (auto& [node, batch] : batches_) {
         if (batch.count == 0) continue;
+        shader_.setInt("uHighlightIndex", node == highlightNode_ ? highlightIndex_ : -1);
+        glBindVertexArray(batch.vao);
+        glDrawArrays(GL_POINTS, 0, batch.count);
+    }
+    glBindVertexArray(0);
+
+    glDisable(GL_PROGRAM_POINT_SIZE);
+}
+
+void NodePainter::paintPick(const Mat4f& viewMatrix, const Mat4f& projMatrix) {
+    pickShader_.use();
+    pickShader_.setMat4("uMVP", projMatrix * viewMatrix);
+
+    for (auto& [node, batch] : batches_) {
+        if (batch.count == 0) continue;
+        pickShader_.setUint("uNodeId", batch.id);
         glBindVertexArray(batch.vao);
         glDrawArrays(GL_POINTS, 0, batch.count);
     }

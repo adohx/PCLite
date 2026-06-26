@@ -17,6 +17,8 @@ public:
 
     void use() const;
     void setMat4(const char* name, const Mat4f& m) const;
+    void setInt(const char* name, int v) const;
+    void setUint(const char* name, unsigned int v) const;
 
 private:
     unsigned int program_ = 0;
@@ -27,5 +29,20 @@ private:
 // each embedding a copy of the same ten lines.
 extern const char* kBasicColorVertexSrc;
 extern const char* kBasicColorFragmentSrc;
+
+// NodePainter's point-cloud shader: same (position, color) pipeline as
+// above, plus a single-point highlight override selected by gl_VertexID
+// (set uHighlightIndex < 0 to disable). Kept separate from the shared basic
+// shader so other painters (axis, bbox, rotation center) aren't coupled to
+// picking/highlight state they don't use.
+extern const char* kPointCloudVertexSrc;
+extern const char* kPointCloudFragmentSrc;
+
+// Pick pass: renders gl_VertexID and a per-draw-call node id into an
+// integer render target instead of color, so a point can be identified by
+// reading back one pixel. Position-only attribute (location 0); the
+// color attribute (location 1) bound in the same VAO is simply unused.
+extern const char* kPickVertexSrc;
+extern const char* kPickFragmentSrc;
 
 #endif // PCLITE_SHADER_H

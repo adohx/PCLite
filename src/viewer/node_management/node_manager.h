@@ -1,6 +1,7 @@
 #ifndef PCLITE_NODE_MANAGER_H
 #define PCLITE_NODE_MANAGER_H
 
+#include <cstdint>
 #include <memory>
 #include "mat.h"
 
@@ -25,6 +26,16 @@ public:
 
     // Calls paint() on every registered painter.
     void render(const Mat4f& viewMatrix, const Mat4f& projMatrix);
+
+    // Calls paintPick() on every registered painter (see Painter::paintPick).
+    void renderPick(const Mat4f& viewMatrix, const Mat4f& projMatrix);
+
+    // Asks every painter to resolve a pick id; returns the first non-null
+    // match (see Painter::nodeForId).
+    Node* nodeForId(uint32_t id) const;
+
+    // Forwards to every painter's setHighlight (see Painter::setHighlight).
+    void setHighlight(Node* node, int pointIndex);
 
 private:
     class NodeManagerPrivate;

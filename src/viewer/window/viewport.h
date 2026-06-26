@@ -3,7 +3,11 @@
 
 #include "window.h"
 #include "camera/camera_controller.h"
+#include "vec3.h"
+#include <cstdint>
 #include <memory>
+
+struct Node;
 
 // Renders the point-cloud scene into an offscreen texture (rather than
 // directly to the screen) so MainWindow can display it inside a dockable
@@ -12,6 +16,16 @@ class Viewport : public Window {
 public:
     Viewport();
     ~Viewport() override;
+
+    // Result of the most recent click-to-pick; node == nullptr means the
+    // click didn't land on a point (or nothing has been picked yet).
+    struct PickResult {
+        bool hit = false;
+        Node* node = nullptr;
+        int pointIndex = -1;
+        vec3f position{};
+    };
+    const PickResult& lastPick() const { return lastPick_; }
 
     void render() override;
     void onResize(int w, int h) override;
@@ -41,13 +55,30 @@ private:
     int          fboWidth_          = 0;
     int          fboHeight_         = 0;
 
+    // Pick pass render target: same size as the color FBO, two-channel
+    // unsigned-int texture holding (nodeId, pointIndex) per pixel. Only
+    // rendered into on demand (a left click that isn't a drag), never
+    // every frame -- see the picking design discussion for why.
+    unsigned int pickFbo_               = 0;
+    unsigned int pickIdTexture_         = 0;
+    unsigned int pickDepthRenderbuffer_ = 0;
+
     bool  leftDragging_  = false;
     bool  rightDragging_ = false;
     float lastMouseX_    = 0.f;
     float lastMouseY_    = 0.f;
+    float pressX_        = 0.f;
+    float pressY_        = 0.f;
+
+    PickResult lastPick_;
 
     void resizeFBO(int w, int h);
     void destroyFBO();
+
+    // Renders a small window around (x, y) into pickFbo_ and reads back
+    // the nearest non-empty pixel, updating lastPick_ and the highlighted
+    // point on every layer.
+    void pick(float x, float y);
 };
 
 #endif // PCLITE_VIEWPORT_H
