@@ -38,6 +38,9 @@ void NodeManager::addPainter(std::unique_ptr<Painter> painter) {
 }
 
 void NodeManager::update(const Camera& camera) {
+    for (auto& painter : d_->painters_)
+        painter->syncCamera(camera);
+
     for (auto& strategy : d_->strategies_) {
         auto* loader = strategy->nodeLoader();
 

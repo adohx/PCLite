@@ -14,6 +14,7 @@
 #include "painter/node_painter.h"
 #include "painter/bounding_box_painter.h"
 #include "painter/axis_painter.h"
+#include "painter/rotation_center_painter.h"
 #include "../src/core/node.h"
 
 #include "imgui.h"
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
     mgr.addPainter(std::make_unique<NodePainter>(dataset->attributes()));
     mgr.addPainter(std::make_unique<BoundingBoxPainter>());
     mgr.addPainter(std::make_unique<AxisPainter>());
+    mgr.addPainter(std::make_unique<RotationCenterPainter>());
 
     vec3d center = {
         (bbMin.x + bbMax.x) * 0.5,

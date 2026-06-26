@@ -15,6 +15,7 @@
 #include "painter/node_painter.h"
 #include "painter/bounding_box_painter.h"
 #include "painter/axis_painter.h"
+#include "painter/rotation_center_painter.h"
 
 namespace fs = std::filesystem;
 
@@ -69,6 +70,7 @@ int Application::run() {
     mgr.addPainter(std::make_unique<NodePainter>(loader->attributes()));
     mgr.addPainter(std::make_unique<BoundingBoxPainter>());
     mgr.addPainter(std::make_unique<AxisPainter>());
+    mgr.addPainter(std::make_unique<RotationCenterPainter>());
 
     vec3d center = {(bbMin.x + bbMax.x) * 0.5,
                     (bbMin.y + bbMax.y) * 0.5,
