@@ -17,20 +17,41 @@
 Converter::Converter(std::vector<std::string> sources, std::string target, Options options)
     : sources_(std::move(sources)), target_(std::move(target)), options_(options) {}
 
+void Converter::setProgressCallback(ConverterProgressCallback cb) {
+    progressCallback_ = std::move(cb);
+}
+
+void Converter::reportProgress(const std::string& stage, float fraction) const {
+    if (progressCallback_) progressCallback_(stage, fraction);
+}
+
 bool Converter::run() {
     writer_ = std::make_shared<ConcurrentWriter>(target_);
 
     if (!prepareAttributes()) return false;
+
+    reportProgress("chunking", 0.f);
     if (!doChunking()) return false;
+    reportProgress("chunking", 1.f);
 
     // Chunker wrote "chunks/<name>.bin" through writer_; flush+close those
     // streams now so Indexer's plain ifstream reads (in doSampling) see the
     // complete files.
     writer_->flushAll();
+
+    reportProgress("hierarchy", 0.f);
     if (!buildHierarchy()) return false;
-    if (!doSampling()) return false;
+    reportProgress("hierarchy", 1.f);
+
+    if (!doSampling()) return false; // reports its own per-chunk "sampling" progress
+
+    reportProgress("merging", 0.f);
     if (!doMerging()) return false;
+    reportProgress("merging", 1.f);
+
+    reportProgress("rebuilding", 0.f);
     if (!doRebuildIndex()) return false;
+    reportProgress("rebuilding", 1.f);
 
     writer_->flushAll();
     return true;
@@ -94,7 +115,11 @@ bool Converter::doSampling() {
     }
 
     bool ok = true;
-    for (std::future<bool> &future : futures) ok = future.get() && ok;
+    size_t total = futures.size();
+    for (size_t i = 0; i < futures.size(); ++i) {
+        ok = futures[i].get() && ok;
+        reportProgress("sampling", total > 0 ? static_cast<float>(i + 1) / static_cast<float>(total) : 1.f);
+    }
     return ok;
 }
 

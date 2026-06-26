@@ -38,6 +38,13 @@ public:
     // the same loader instance it gave to the LOD strategy.
     void setPickAssistLoader(PointCloudLoader* loader) { pickAssistLoader_ = loader; }
 
+    // Tears down the current project's scene state (layers/cameras/
+    // controller/pick state) so the viewport is back to its just-constructed
+    // state, ready for a different project to be opened. Waits on any
+    // in-flight pick-assist refinement first, since it captures a raw
+    // PointCloudLoader* that's about to become invalid.
+    void reset();
+
     void render() override;
     void onResize(int w, int h) override;
 

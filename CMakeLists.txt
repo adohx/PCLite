@@ -17,15 +17,10 @@ add_subdirectory(3rd_party)
 
 add_subdirectory(src/utilities)
 add_subdirectory(src/core)
+add_subdirectory(src/project)
 add_subdirectory(src/converter)
 add_subdirectory(src/viewer)
 
 add_executable(${PROJECT_NAME} main.cpp application.cpp)
-target_link_libraries(${PROJECT_NAME} PRIVATE converter viewer)
-target_include_directories(${PROJECT_NAME} PRIVATE src/converter/src src/viewer)
-
-# Standalone point cloud viewer tool
-add_executable(pcl_viewer tools/pcl_viewer.cpp)
-target_link_libraries(pcl_viewer PRIVATE viewer)
-target_include_directories(pcl_viewer PRIVATE src/viewer)
-target_compile_features(pcl_viewer PRIVATE cxx_std_20)
+target_link_libraries(${PROJECT_NAME} PRIVATE converter viewer pclite_project)
+target_include_directories(${PROJECT_NAME} PRIVATE src/converter/src src/viewer src/project)

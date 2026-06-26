@@ -219,6 +219,59 @@ TEST(ConverterTest, ConvertsSyntheticLasAndProducesValidOutputs) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(ConverterTest, ProgressCallbackReportsAllStagesAndReachesComplete) {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                 ("pclite_converter_progress_test_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::filesystem::path lasPath = dir / "synthetic.las";
+    std::filesystem::path target = dir / "out";
+
+    constexpr size_t kNumPoints = 500;
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> dist(0.0, 100.0);
+
+    std::vector<vec3d> points;
+    points.reserve(kNumPoints);
+    for (size_t i = 0; i < kNumPoints; ++i) points.push_back({dist(rng), dist(rng), dist(rng)});
+
+    writeSyntheticLas(lasPath, points, {0.001, 0.001, 0.001}, {0, 0, 0});
+
+    Converter::Options options;
+    options.maxPointsPerChunk = 500;
+    options.firstChunkSize = 100;
+
+    Converter converter({lasPath.string()}, target.string(), options);
+
+    std::vector<std::pair<std::string, float>> calls;
+    converter.setProgressCallback([&](const std::string &stage, float fraction) {
+        calls.emplace_back(stage, fraction);
+    });
+
+    ASSERT_TRUE(converter.run());
+
+    ASSERT_FALSE(calls.empty());
+
+    auto reachedComplete = [&](const std::string &stage) {
+        for (auto &c : calls)
+            if (c.first == stage && c.second == 1.f) return true;
+        return false;
+    };
+    for (const std::string &stage : {"chunking", "hierarchy", "sampling", "merging", "rebuilding"})
+        EXPECT_TRUE(reachedComplete(stage)) << "stage: " << stage;
+
+    // "sampling" fraction should be monotonically non-decreasing across calls.
+    float lastSamplingFraction = -1.f;
+    for (auto &c : calls) {
+        if (c.first != "sampling") continue;
+        EXPECT_GE(c.second, lastSamplingFraction);
+        lastSamplingFraction = c.second;
+    }
+
+    std::filesystem::remove_all(dir);
+}
+
 // Runs the full converter pipeline against the real office.las (~49M points,
 // ~1.2GB). Not part of the regular suite (slow); run manually with
 // --gtest_also_run_disabled_tests to sanity-check on real data.

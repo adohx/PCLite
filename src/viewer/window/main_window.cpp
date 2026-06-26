@@ -77,6 +77,14 @@ void MainWindow::setPropertiesCallback(std::function<void()> callback) {
     propertiesCallback_ = std::move(callback);
 }
 
+void MainWindow::setHubContentCallback(std::function<void()> callback) {
+    hubContentCallback_ = std::move(callback);
+}
+
+void MainWindow::setFileMenuCallback(std::function<void()> callback) {
+    fileMenuCallback_ = std::move(callback);
+}
+
 void MainWindow::buildDefaultDockLayout(unsigned int dockspaceId) {
     ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->Size);
@@ -95,7 +103,46 @@ void MainWindow::buildDefaultDockLayout(unsigned int dockspaceId) {
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
+void MainWindow::drawMenuBar() {
+    if (!ImGui::BeginMainMenuBar()) return;
+
+    if (ImGui::BeginMenu("File")) {
+        if (fileMenuCallback_) fileMenuCallback_();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Exit")) running_ = false;
+        ImGui::EndMenu();
+    }
+    ImGui::EndMainMenuBar();
+}
+
+void MainWindow::drawHub() {
+    viewportHovered_ = false; // the Viewport panel isn't drawn in Hub mode
+
+    const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(mainViewport->WorkPos);
+    ImGui::SetNextWindowSize(mainViewport->WorkSize);
+    ImGui::SetNextWindowViewport(mainViewport->ID);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNavFocus;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::Begin("ProjectHub", nullptr, flags);
+    if (hubContentCallback_) hubContentCallback_();
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
 void MainWindow::drawUI() {
+    drawMenuBar();
+
+    if (mode_ == Mode::Hub) {
+        drawHub();
+        return;
+    }
+
     const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mainViewport->WorkPos);
     ImGui::SetNextWindowSize(mainViewport->WorkSize);

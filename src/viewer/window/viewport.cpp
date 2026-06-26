@@ -58,6 +58,26 @@ Viewport::~Viewport() {
     destroyFBO();
 }
 
+void Viewport::reset() {
+    // The in-flight task (if any) captured a raw PointCloudLoader*; block
+    // until it finishes before the caller destroys that loader, rather than
+    // letting it run on into a dangling pointer.
+    if (pendingRefinement_.valid()) pendingRefinement_.wait();
+
+    layers_.clear();
+    cameras_.clear();
+    controller_.reset();
+
+    lastPick_ = PickResult{};
+    pickAssistLoader_ = nullptr;
+    currentHitLayer_ = nullptr;
+    currentSearchRadius_ = 0.f;
+    refinementLaunchedForCurrentPick_ = false;
+    hoverSettleTimer_ = 0.f;
+    hoverPending_ = false;
+    ++pickGeneration_;
+}
+
 void Viewport::setController(std::unique_ptr<CameraController> controller) {
     controller_ = std::move(controller);
     if (controller_) controller_->onResize(width_, height_);

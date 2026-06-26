@@ -19,6 +19,6 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${NLOHMANN_JSON_INCLUDE_DIR})
 target_link_libraries(${PROJECT_NAME} PUBLIC
-    core utilities OpenGL::GL SDL2::SDL2 spdlog::spdlog imgui glad)
+    core utilities pclite_project OpenGL::GL SDL2::SDL2 spdlog::spdlog imgui glad)
 
 add_subdirectory(tests)
