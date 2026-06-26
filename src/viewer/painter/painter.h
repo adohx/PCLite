@@ -10,7 +10,7 @@ public:
 
     virtual void addNode(Node* node) = 0;
     virtual void removeNode(Node* node) = 0;
-    virtual void paint(const Mat4f& viewMatrix) = 0;
+    virtual void paint(const Mat4f& viewMatrix, const Mat4f& projMatrix) = 0;
 };
 
 #endif //PCLITE_PAINTER_H

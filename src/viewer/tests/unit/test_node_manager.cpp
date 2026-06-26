@@ -16,7 +16,7 @@ class MockPainter : public Painter {
 public:
     void addNode(Node* node) override    { added_.push_back(node); }
     void removeNode(Node* node) override { removed_.push_back(node); }
-    void paint(const Mat4f&) override    { ++paintCalls_; }
+    void paint(const Mat4f&, const Mat4f&) override { ++paintCalls_; }
 
     std::vector<Node*> added_;
     std::vector<Node*> removed_;
@@ -264,7 +264,7 @@ TEST(NodeManagerTest, RenderCallsPaintOnAllPainters) {
     mgr.addPainter(std::unique_ptr<Painter>(p1));
     mgr.addPainter(std::unique_ptr<Painter>(p2));
 
-    mgr.render(Mat4f::identity());
+    mgr.render(Mat4f::identity(), Mat4f::identity());
 
     EXPECT_EQ(p1->paintCalls_, 1);
     EXPECT_EQ(p2->paintCalls_, 1);
@@ -277,7 +277,7 @@ TEST(NodeManagerTest, RenderPassesViewMatrixToPainter) {
     public:
         void addNode(Node*) override {}
         void removeNode(Node*) override {}
-        void paint(const Mat4f& m) override { lastMatrix_ = m; }
+        void paint(const Mat4f& m, const Mat4f&) override { lastMatrix_ = m; }
         Mat4f lastMatrix_;
     };
 
@@ -285,12 +285,12 @@ TEST(NodeManagerTest, RenderPassesViewMatrixToPainter) {
     mgr.addPainter(std::unique_ptr<Painter>(cap));
 
     auto id = Mat4f::identity();
-    mgr.render(id);
+    mgr.render(id, id);
 
     EXPECT_EQ(cap->lastMatrix_, id);
 }
 
 TEST(NodeManagerTest, RenderOnEmptyManagerDoesNotCrash) {
     NodeManager mgr;
-    EXPECT_NO_THROW(mgr.render(Mat4f::identity()));
+    EXPECT_NO_THROW(mgr.render(Mat4f::identity(), Mat4f::identity()));
 }

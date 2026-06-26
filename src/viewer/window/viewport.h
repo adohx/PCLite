@@ -1,7 +1,7 @@
 #ifndef PCLITE_VIEWPORT_H
 #define PCLITE_VIEWPORT_H
 
-#include "../../ui/window.h"
+#include "window.h"
 #include "camera/camera_controller.h"
 #include <memory>
 

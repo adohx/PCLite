@@ -1,11 +1,10 @@
 #include "viewport.h"
-#include "gl_fbo.h"
 #include "camera/camera.h"
 #include "mat.h"
 #include "layer/layer.h"
 #include "node_management/node_manager.h"
+#include <glad/gl.h>
 #include <SDL2/SDL.h>
-#include <SDL2/SDL_opengl.h>
 #include <stdexcept>
 
 static constexpr int kLeftButton  = 1;
@@ -71,56 +70,50 @@ void Viewport::resizeFBO(int w, int h) {
     fboWidth_  = w;
     fboHeight_ = h;
 
-    glGenFramebuffers_(1, &fbo_);
-    glBindFramebuffer_(GL_FRAMEBUFFER, fbo_);
+    glGenFramebuffers(1, &fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
 
     glGenTextures(1, &colorTexture_);
     glBindTexture(GL_TEXTURE_2D, colorTexture_);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture_, 0);
 
-    glGenRenderbuffers_(1, &depthRenderbuffer_);
-    glBindRenderbuffer_(GL_RENDERBUFFER, depthRenderbuffer_);
-    glRenderbufferStorage_(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
-    glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRenderbuffer_);
+    glGenRenderbuffers(1, &depthRenderbuffer_);
+    glBindRenderbuffer(GL_RENDERBUFFER, depthRenderbuffer_);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRenderbuffer_);
 
-    GLenum status = glCheckFramebufferStatus_(GL_FRAMEBUFFER);
-    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (status != GL_FRAMEBUFFER_COMPLETE)
         throw std::runtime_error("Viewport framebuffer is incomplete");
 }
 
 void Viewport::destroyFBO() {
-    if (depthRenderbuffer_) { glDeleteRenderbuffers_(1, &depthRenderbuffer_); depthRenderbuffer_ = 0; }
+    if (depthRenderbuffer_) { glDeleteRenderbuffers(1, &depthRenderbuffer_); depthRenderbuffer_ = 0; }
     if (colorTexture_)      { glDeleteTextures(1, &colorTexture_); colorTexture_ = 0; }
-    if (fbo_)               { glDeleteFramebuffers_(1, &fbo_); fbo_ = 0; }
+    if (fbo_)               { glDeleteFramebuffers(1, &fbo_); fbo_ = 0; }
 }
 
 void Viewport::render() {
     if (fbo_ == 0) return;
 
-    glBindFramebuffer_(GL_FRAMEBUFFER, fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glViewport(0, 0, fboWidth_, fboHeight_);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     if (!cameras_.empty() && !layers_.empty()) {
         auto& cam = *cameras_[0];
-
-        glMatrixMode(GL_PROJECTION);
-        auto proj = cam.projectionMatrix().data();
-        glLoadMatrixf(proj.data());
-        glMatrixMode(GL_MODELVIEW);
+        Mat4f projMatrix = cam.projectionMatrix();
         Mat4f viewMatrix = cam.viewMatrix();
-        auto viewArr = viewMatrix.data();
-        glLoadMatrixf(viewArr.data());
 
         for (auto& layer : layers_) {
             layer->nodeManager().update(cam);
-            layer->nodeManager().render(viewMatrix);
+            layer->nodeManager().render(viewMatrix, projMatrix);
         }
     }
 
-    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

@@ -17,7 +17,7 @@
 #include "../src/core/node.h"
 
 #include "imgui.h"
-#include <SDL2/SDL_opengl.h>
+#include <glad/gl.h>
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -37,6 +37,11 @@ int main(int argc, char** argv) {
 
     printf("BBox: [%.2f %.2f %.2f] - [%.2f %.2f %.2f]  span=%.1fm\n",
         bbMin.x, bbMin.y, bbMin.z, bbMax.x, bbMax.y, bbMax.z, span);
+
+    // The painters below create real GL objects (shaders, VAOs/VBOs) in
+    // their constructors, so MainWindow (which owns the GL context) must
+    // exist first.
+    MainWindow window(1280, 800, "PCLite Viewer");
 
     auto layer    = std::make_unique<PointCloudLayer>();
     auto strategy = std::make_unique<SSELruStrategy>(/*screenHeight=*/800,
@@ -65,7 +70,6 @@ int main(int argc, char** argv) {
     auto controller = std::make_unique<ArcballController>();
     controller->syncFromCamera(*camera);
 
-    MainWindow window(1280, 800, "PCLite Viewer");
     window.viewport().addLayer(std::move(layer));
     window.viewport().addCamera(std::move(camera));
     window.viewport().setController(std::move(controller));

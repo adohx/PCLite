@@ -24,7 +24,7 @@ public:
     void update(const Camera& camera);
 
     // Calls paint() on every registered painter.
-    void render(const Mat4f& viewMatrix);
+    void render(const Mat4f& viewMatrix, const Mat4f& projMatrix);
 
 private:
     class NodeManagerPrivate;

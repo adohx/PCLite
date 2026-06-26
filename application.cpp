@@ -52,6 +52,11 @@ int Application::run() {
     fprintf(stderr, "BBox: [%.2f %.2f %.2f] - [%.2f %.2f %.2f]  span=%.1fm\n",
             bbMin.x, bbMin.y, bbMin.z, bbMax.x, bbMax.y, bbMax.z, span);
 
+    // The painters below create real GL objects (shaders, VAOs/VBOs) in
+    // their constructors, so MainWindow (which owns the GL context) must
+    // exist first.
+    MainWindow window(1280, 800, "PCLite - " + lasPath_);
+
     auto layer    = std::make_unique<PointCloudLayer>();
     auto strategy = std::make_unique<SSELruStrategy>(/*screenHeight=*/768,
                                                         /*sseThreshold=*/1.0f,
@@ -78,7 +83,6 @@ int Application::run() {
     auto controller = std::make_unique<ArcballController>();
     controller->syncFromCamera(*camera);
 
-    MainWindow window(1280, 800, "PCLite - " + lasPath_);
     window.viewport().addLayer(std::move(layer));
     window.viewport().addCamera(std::move(camera));
     window.viewport().setController(std::move(controller));
