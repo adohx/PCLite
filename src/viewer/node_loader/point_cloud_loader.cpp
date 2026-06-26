@@ -39,11 +39,42 @@ PointCloudLoader::PointCloudLoader(const std::string &dir) : dir_(dir) {
     hierarchyFile_.open(dir_ + "/hierarchy.bin", std::ios::in|std::ios::binary);
     if (!hierarchyFile_.is_open())
         throw std::runtime_error("Cannot open: " + dir_ + "/hierarchy.bin");
+
+    // Optional: datasets converted before the pick-assist KD-tree feature
+    // existed won't have these files. Their absence just means kdTree() on
+    // every node stays empty -- not a hard error.
+    kdtreeFile_.open(dir_ + "/kdtree.bin", std::ios::in|std::ios::binary);
+    parseKdtreeIndex(dir_ + "/kdtree_index.bin");
 }
 
 PointCloudLoader::~PointCloudLoader() {
     octreeFile_.close();
     hierarchyFile_.close();
+    kdtreeFile_.close();
+}
+
+void PointCloudLoader::parseKdtreeIndex(const std::string &path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) return;
+
+    std::streamsize fileSize = in.tellg();
+    in.seekg(0);
+    std::vector<char> buf(static_cast<size_t>(fileSize));
+    if (fileSize > 0 && !in.read(buf.data(), fileSize)) return;
+
+    size_t i = 0;
+    while (i < buf.size()) {
+        uint8_t nameLen = static_cast<uint8_t>(buf[i]);
+        ++i;
+        if (i + nameLen + 16 > buf.size()) break;
+        std::string name(buf.data() + i, nameLen);
+        i += nameLen;
+        uint64_t offset = readLE<uint64_t>(buf.data(), i);
+        i += 8;
+        uint64_t size = readLE<uint64_t>(buf.data(), i);
+        i += 8;
+        kdtreeIndex_[name] = {offset, size};
+    }
 }
 
 void PointCloudLoader::parseMetadata(const std::string &path) {
@@ -113,13 +144,16 @@ std::shared_ptr<Node> PointCloudLoader::loadRoot() {
     root->proxyChunkAddr_ = 0;
     root->proxyChunkSize_ = header_.firstChunk_.chunkSize_;
 
-    loadHierarchyChunk(root);
-    loadPoints(root);
+    {
+        std::lock_guard<std::mutex> lock(fileMutex_);
+        loadHierarchyChunkLocked(root);
+        loadPointsLocked(root);
+    }
 
     return root;
 }
 
-bool PointCloudLoader::loadHierarchyChunk(std::shared_ptr<Node> node) {
+bool PointCloudLoader::loadHierarchyChunkLocked(const std::shared_ptr<Node> &node) {
     if (!node)
         return false;
 
@@ -183,7 +217,18 @@ bool PointCloudLoader::loadHierarchyChunk(std::shared_ptr<Node> node) {
     return true;
 }
 
-bool PointCloudLoader::loadPoints(std::shared_ptr<Node> node) {
+void PointCloudLoader::loadKdtreeBytesLocked(const std::shared_ptr<Node> &node) {
+    if (!kdtreeFile_.is_open()) return;
+    auto it = kdtreeIndex_.find(node->name_);
+    if (it == kdtreeIndex_.end() || it->second.size == 0) return;
+
+    std::vector<uint8_t> buffer(it->second.size);
+    kdtreeFile_.seekg(static_cast<std::streamoff>(it->second.offset));
+    if (kdtreeFile_.read(reinterpret_cast<char *>(buffer.data()), static_cast<std::streamsize>(it->second.size)))
+        node->setKDTreeBytes(std::move(buffer));
+}
+
+bool PointCloudLoader::loadPointsLocked(const std::shared_ptr<Node> &node) {
     try {
         if (node->type_ == NodeType::Proxy) {
            return false;
@@ -197,6 +242,7 @@ bool PointCloudLoader::loadPoints(std::shared_ptr<Node> node) {
         }
 
         node->setData(std::move(buffer), attributes_);
+        loadKdtreeBytesLocked(node);
         node->setLoaded(true);
         node->setLoading(false);
     }
@@ -214,11 +260,142 @@ bool PointCloudLoader::load(std::shared_ptr<Node> node) {
 
     node->setLoading(true);
 
+    std::lock_guard<std::mutex> lock(fileMutex_);
+
     if (node->type_ == NodeType::Proxy) {
-        loadHierarchyChunk(node);
+        loadHierarchyChunkLocked(node);
         node->setLoading(false);  // hierarchy expanded; point data still needs a separate load call
         return true;
     }
 
-    return loadPoints(node);
+    return loadPointsLocked(node);
+}
+
+namespace {
+bool boxContains(const BoundingBoxd &bb, const vec3d &p) {
+    auto mn = bb.min(), mx = bb.max();
+    return p.x >= mn.x && p.x <= mx.x &&
+           p.y >= mn.y && p.y <= mx.y &&
+           p.z >= mn.z && p.z <= mx.z;
+}
+} // namespace
+
+// Same record layout/semantics as loadHierarchyChunkLocked (record 0 is the
+// batch's own entry node; its real type/address come from this record, not
+// from whatever the caller thought it was), but written into a local
+// ScratchNode array instead of the live Node tree, so this never touches
+// anything the main thread can see.
+std::vector<PointCloudLoader::ScratchNode> PointCloudLoader::parseHierarchyBatchLocked(
+        uint64_t addr, uint64_t size, const std::string &rootName, const BoundingBoxd &rootBB) {
+    std::vector<ScratchNode> nodes;
+    if (size == 0) return nodes;
+
+    std::vector<char> buffer(size);
+    hierarchyFile_.seekg(static_cast<std::streamoff>(addr));
+    if (!hierarchyFile_.read(buffer.data(), static_cast<std::streamsize>(size))) return {};
+
+    int numNodes = static_cast<int>(size / BYTES_PER_HIERARCHY_NODE);
+    nodes.resize(numNodes);
+    nodes[0].name = rootName;
+    nodes[0].bb = rootBB;
+    nodes[0].type = NodeType::Proxy; // mirrors: this batch was reached via a proxy stub
+
+    std::vector<int> order(numNodes, -1);
+    order[0] = 0;
+    int nodePos = 1;
+
+    for (int i = 0; i < numNodes; ++i) {
+        int idx = order[i];
+        if (idx < 0) break;
+        ScratchNode &cur = nodes[idx];
+
+        const char *nd = buffer.data() + i * BYTES_PER_HIERARCHY_NODE;
+        auto type = static_cast<NodeType>(readLE<uint8_t>(nd, 0));
+        auto childMask = readLE<uint8_t>(nd, 1);
+        auto addr2 = readLE<uint64_t>(nd, 6);
+        auto size2 = readLE<uint64_t>(nd, 14);
+
+        if (cur.type == NodeType::Proxy) {
+            cur.address = addr2;
+            cur.byteSize = size2;
+        } else if (type == NodeType::Proxy) {
+            cur.proxyChunkAddr = addr2;
+            cur.proxyChunkSize = size2;
+        } else {
+            cur.address = addr2;
+            cur.byteSize = size2;
+        }
+        cur.type = type;
+        if (cur.type == NodeType::Proxy) continue;
+
+        for (int ci = 0; ci < 8; ++ci) {
+            if (!((1 << ci) & childMask)) continue;
+            if (nodePos >= numNodes) break;
+            int childIdx = nodePos;
+            nodes[childIdx].name = cur.name + std::to_string(ci);
+            nodes[childIdx].bb = createChildAABB(cur.bb, ci);
+            cur.children[ci] = childIdx;
+            order[nodePos++] = childIdx;
+        }
+    }
+    return nodes;
+}
+
+PointCloudLoader::LeafQueryResult PointCloudLoader::queryFinestLeafAt(vec3d point) {
+    std::lock_guard<std::mutex> lock(fileMutex_);
+    LeafQueryResult result;
+
+    std::string name = "r";
+    BoundingBoxd bb = header_.bbox_;
+    uint64_t proxyAddr = 0, proxySize = header_.firstChunk_.chunkSize_;
+    uint64_t pointAddr = 0, pointSize = 0;
+    NodeType type = NodeType::Proxy;
+
+    // Repeatedly expand hierarchy batches (each may already contain several
+    // real levels below its own entry node) until landing on a real node
+    // with no child covering `point` any further.
+    while (type == NodeType::Proxy) {
+        if (proxySize == 0) return result;
+        auto batch = parseHierarchyBatchLocked(proxyAddr, proxySize, name, bb);
+        if (batch.empty()) return result;
+
+        int cur = 0;
+        while (true) {
+            const ScratchNode &n = batch[cur];
+            int nextIdx = -1;
+            for (int c = 0; c < 8; ++c) {
+                if (n.children[c] < 0) continue;
+                if (boxContains(batch[n.children[c]].bb, point)) { nextIdx = n.children[c]; break; }
+            }
+            if (nextIdx < 0) {
+                name = n.name; bb = n.bb; type = n.type;
+                pointAddr = n.address; pointSize = n.byteSize;
+                proxyAddr = n.proxyChunkAddr; proxySize = n.proxyChunkSize;
+                break;
+            }
+            cur = nextIdx;
+        }
+    }
+
+    if (pointSize == 0) return result;
+
+    std::vector<uint8_t> buffer(pointSize);
+    octreeFile_.seekg(static_cast<std::streamoff>(pointAddr));
+    if (!octreeFile_.read(reinterpret_cast<char *>(buffer.data()), static_cast<std::streamsize>(pointSize)))
+        return result;
+
+    Node tmpNode(name, bb); // local scratch instance, purely to reuse setData()'s decoder
+    tmpNode.setData(buffer, attributes_);
+    result.points = tmpNode.getPoints();
+
+    auto it = kdtreeIndex_.find(name);
+    if (it != kdtreeIndex_.end() && it->second.size > 0 && kdtreeFile_.is_open()) {
+        std::vector<uint8_t> kdBytes(it->second.size);
+        kdtreeFile_.seekg(static_cast<std::streamoff>(it->second.offset));
+        if (kdtreeFile_.read(reinterpret_cast<char *>(kdBytes.data()), static_cast<std::streamsize>(it->second.size)))
+            result.kdTree = KDTree3::deserialize(kdBytes);
+    }
+
+    result.found = true;
+    return result;
 }

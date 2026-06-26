@@ -16,6 +16,7 @@
 #include "painter/bounding_box_painter.h"
 #include "painter/axis_painter.h"
 #include "painter/rotation_center_painter.h"
+#include "painter/plane_fit_ring_painter.h"
 
 namespace fs = std::filesystem;
 
@@ -71,6 +72,7 @@ int Application::run() {
     mgr.addPainter(std::make_unique<BoundingBoxPainter>());
     mgr.addPainter(std::make_unique<AxisPainter>());
     mgr.addPainter(std::make_unique<RotationCenterPainter>());
+    mgr.addPainter(std::make_unique<PlaneFitRingPainter>());
 
     vec3d center = {(bbMin.x + bbMax.x) * 0.5,
                     (bbMin.y + bbMax.y) * 0.5,
@@ -88,6 +90,7 @@ int Application::run() {
     window.viewport().addLayer(std::move(layer));
     window.viewport().addCamera(std::move(camera));
     window.viewport().setController(std::move(controller));
+    window.viewport().setPickAssistLoader(loader.get());
     window.run();
 
     fs::remove_all(outDir);

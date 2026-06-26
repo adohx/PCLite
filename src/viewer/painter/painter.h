@@ -3,6 +3,7 @@
 
 #include "../../core/node.h"
 #include "mat.h"
+#include "vec3.h"
 #include <cstdint>
 
 class Camera;
@@ -29,6 +30,16 @@ public:
     // subsequent paint() calls; node == nullptr clears it. No-op for
     // painters that don't draw individually-pickable points.
     virtual void setHighlight(Node* /*node*/, int /*pointIndex*/) {}
+
+    // Sets (or clears, if active == false) the locally-fitted plane to show
+    // as a pick-assist indicator: a ring centered at `center`, oriented to
+    // `normal`. `radius` is the neighborhood radius used for the fit, kept
+    // for callers that want it for diagnostics/future use, but
+    // PlaneFitRingPainter no longer sizes the ring by it -- the ring is a
+    // fixed-screen-size cursor decal, independent of the fit's search
+    // radius. No-op for painters that don't draw this indicator.
+    virtual void setPlaneFit(bool /*active*/, const vec3f& /*center*/,
+                             const vec3f& /*normal*/, float /*radius*/) {}
 
     // Called once per frame with the up-to-date camera, before paint().
     // Most painters don't need camera state directly (it's baked into the

@@ -3,8 +3,11 @@
 #include "mat.h"
 #include "layer/layer.h"
 #include "node_management/node_manager.h"
+#include "node_loader/point_cloud_loader.h"
 #include "../../core/node.h"
+#include "../../core/plane_fit.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <glad/gl.h>
 #include <SDL2/SDL.h>
@@ -22,6 +25,28 @@ static constexpr float kClickMoveTolerance = 3.f;
 // point's exact pixel without resorting to a full-screen pick buffer.
 static constexpr int kPickRadius = 4;
 
+// Minimum neighborhood size to attempt a plane fit; below this the PCA
+// normal is too noisy to be worth showing.
+static constexpr size_t kMinPlaneFitPoints = 6;
+
+namespace {
+// Gathers radius-search hits across `nodes`' own KD-trees (each one only
+// knows about its own points -- this is the cross-node merge) and fits a
+// plane through the combined neighborhood.
+bool fitPlaneFromNodes(const std::vector<Node*>& nodes, const vec3f& query, float radius,
+                       vec3f& outCenter, vec3f& outNormal) {
+    std::vector<vec3f> neighbors;
+    for (Node* n : nodes) {
+        auto idxs = n->kdTree().radiusSearch(query, radius);
+        const auto& pts = n->points();
+        for (uint32_t idx : idxs)
+            if (idx < pts.size()) neighbors.push_back(pts[idx]);
+    }
+    if (neighbors.size() < kMinPlaneFitPoints) return false;
+    return fitPlane(neighbors, outCenter, outNormal);
+}
+} // namespace
+
 Viewport::Viewport() = default;
 
 Viewport::~Viewport() {
@@ -34,9 +59,22 @@ void Viewport::setController(std::unique_ptr<CameraController> controller) {
 }
 
 void Viewport::update(float dt) {
+    applyPendingRefinement();
+
     if (!controller_) return;
     controller_->update(dt);
     if (!cameras_.empty()) controller_->applyToCamera(*cameras_[0]);
+}
+
+void Viewport::applyPendingRefinement() {
+    if (!pendingRefinement_.valid()) return;
+    if (pendingRefinement_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+
+    PendingRefinement result = pendingRefinement_.get();
+    if (result.generation != pickGeneration_) return; // a newer pick() superseded this one
+
+    if (result.valid && result.layer)
+        result.layer->nodeManager().setPlaneFit(true, result.center, result.normal, result.radius);
 }
 
 void Viewport::onResize(int w, int h) {
@@ -197,6 +235,7 @@ void Viewport::pick(float x, float y) {
     }
 
     lastPick_ = PickResult{};
+    Layer* hitLayer = nullptr;
     if (bestNodeId != 0) {
         for (auto& layer : layers_) {
             Node* node = layer->nodeManager().nodeForId(bestNodeId);
@@ -207,6 +246,7 @@ void Viewport::pick(float x, float y) {
                 lastPick_.node       = node;
                 lastPick_.pointIndex = (int)bestPointIndex;
                 lastPick_.position   = points[bestPointIndex];
+                hitLayer = layer.get();
             }
             break;
         }
@@ -214,6 +254,68 @@ void Viewport::pick(float x, float y) {
 
     for (auto& layer : layers_)
         layer->nodeManager().setHighlight(lastPick_.node, lastPick_.pointIndex);
+
+    // Pick-assist plane fit, pass 1 (immediate): cross-node merge over
+    // whatever's currently resident. Cheap (in-memory only) but precision
+    // follows the current LOD -- see [[project_point_picking]].
+    ++pickGeneration_;
+    uint64_t generation = pickGeneration_;
+
+    bool planeOk = false;
+    vec3f planeCenter{}, planeNormal{};
+    float searchRadius = 0.f;
+
+    if (lastPick_.hit && hitLayer) {
+        searchRadius = std::max(static_cast<float>(lastPick_.node->spacing_ * 4.0), 1e-3f);
+        auto candidates = hitLayer->nodeManager().nodesNear(
+            vec3d{static_cast<double>(lastPick_.position.x),
+                  static_cast<double>(lastPick_.position.y),
+                  static_cast<double>(lastPick_.position.z)},
+            searchRadius);
+        planeOk = fitPlaneFromNodes(candidates, lastPick_.position, searchRadius, planeCenter, planeNormal);
+    }
+
+    for (auto& layer : layers_) {
+        bool isHitLayer = (layer.get() == hitLayer);
+        layer->nodeManager().setPlaneFit(isHitLayer && planeOk, planeCenter, planeNormal, searchRadius);
+    }
+
+    // Pick-assist plane fit, pass 2 (background refinement): descend to the
+    // actual full-resolution leaf under the cursor regardless of current
+    // LOD, off the main thread, and apply it next frame if still relevant.
+    // queryFinestLeafAt never touches any live Node, so this can't race the
+    // main thread's ordinary LRU-driven loading.
+    if (lastPick_.hit && hitLayer && pickAssistLoader_) {
+        PointCloudLoader* loader = pickAssistLoader_;
+        Layer* layerPtr = hitLayer;
+        vec3f queryPos = lastPick_.position;
+        float radius = searchRadius;
+
+        pendingRefinement_ = refinementPool_.enqueue([loader, layerPtr, queryPos, radius, generation]() {
+            PendingRefinement result;
+            result.generation = generation;
+
+            vec3d worldPoint{static_cast<double>(queryPos.x),
+                              static_cast<double>(queryPos.y),
+                              static_cast<double>(queryPos.z)};
+            auto leaf = loader->queryFinestLeafAt(worldPoint);
+            if (!leaf.found) return result;
+
+            auto idxs = leaf.kdTree.radiusSearch(queryPos, radius);
+            std::vector<vec3f> neighbors;
+            neighbors.reserve(idxs.size());
+            for (uint32_t idx : idxs)
+                if (idx < leaf.points.size()) neighbors.push_back(leaf.points[idx]);
+
+            if (neighbors.size() >= kMinPlaneFitPoints &&
+                fitPlane(neighbors, result.center, result.normal)) {
+                result.valid  = true;
+                result.layer  = layerPtr;
+                result.radius = radius;
+            }
+            return result;
+        });
+    }
 }
 
 void Viewport::render() {

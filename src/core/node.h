@@ -10,6 +10,7 @@
 
 #include "attributes.h"
 #include "bounding_box.h"
+#include "kdtree.h"
 #include "vec3.h"
 
 enum class NodeType : uint8_t {
@@ -67,6 +68,8 @@ struct Node {
     void clearData() {
         points_.clear();
         colors_.clear();
+        kdtreeBytes_.clear();
+        kdTreeCache_.reset();
         isLoaded_.store(false);
     }
 
@@ -75,6 +78,27 @@ struct Node {
     std::vector<vec3f> getPoints() const;
 
     std::vector<vec3f> getColors() const;
+
+    // Non-copying access, for hot paths (e.g. pick-assist plane fitting)
+    // that just need to index into the points already resident in memory.
+    const std::vector<vec3f>& points() const { return points_; }
+
+    // Raw KD-tree bytes read from "kdtree.bin" by the loader (see
+    // PointCloudLoader); not parsed yet at this point, just stashed.
+    void setKDTreeBytes(std::vector<uint8_t> bytes) {
+        kdtreeBytes_ = std::move(bytes);
+        kdTreeCache_.reset();
+    }
+
+    // Lazily deserializes kdtreeBytes_ on first call and caches the result
+    // (cheap: the expensive build() already happened once, offline, in the
+    // converter -- this is just a one-time byte-array parse). Empty if no
+    // KD-tree bytes were ever set.
+    KDTree3 &kdTree() const {
+        if (!kdTreeCache_)
+            kdTreeCache_ = std::make_unique<KDTree3>(KDTree3::deserialize(kdtreeBytes_));
+        return *kdTreeCache_;
+    }
 
 private:
     std::vector<vec3f> decodeBlock(const std::vector<uint8_t> &data,
@@ -88,6 +112,8 @@ private:
     Attributes attributes_;
     std::vector<vec3f> points_;
     std::vector<vec3f> colors_;
+    std::vector<uint8_t> kdtreeBytes_;
+    mutable std::unique_ptr<KDTree3> kdTreeCache_;
 };
 
 #endif //PCLITE_NODE_H

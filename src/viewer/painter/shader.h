@@ -19,6 +19,7 @@ public:
     void setMat4(const char* name, const Mat4f& m) const;
     void setInt(const char* name, int v) const;
     void setUint(const char* name, unsigned int v) const;
+    void setVec4(const char* name, float x, float y, float z, float w) const;
 
 private:
     unsigned int program_ = 0;
@@ -44,5 +45,11 @@ extern const char* kPointCloudFragmentSrc;
 // color attribute (location 1) bound in the same VAO is simply unused.
 extern const char* kPickVertexSrc;
 extern const char* kPickFragmentSrc;
+
+// Flat, single-color translucent fill: position-only attribute, one uColor
+// (rgba) uniform for the whole draw call. Used by PlaneFitRingPainter's
+// annulus, which has no per-vertex color/alpha to carry.
+extern const char* kFlatColorVertexSrc;
+extern const char* kFlatColorFragmentSrc;
 
 #endif // PCLITE_SHADER_H

@@ -66,6 +66,22 @@ void main() {
 }
 )";
 
+const char* kFlatColorVertexSrc = R"(#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMVP;
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* kFlatColorFragmentSrc = R"(#version 330 core
+uniform vec4 uColor;
+out vec4 FragColor;
+void main() {
+    FragColor = uColor;
+}
+)";
+
 namespace {
 
 unsigned int compile(unsigned int type, const char* src) {
@@ -132,4 +148,8 @@ void Shader::setInt(const char* name, int v) const {
 
 void Shader::setUint(const char* name, unsigned int v) const {
     glUniform1ui(glGetUniformLocation(program_, name), v);
+}
+
+void Shader::setVec4(const char* name, float x, float y, float z, float w) const {
+    glUniform4f(glGetUniformLocation(program_, name), x, y, z, w);
 }

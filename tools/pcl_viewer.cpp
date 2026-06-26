@@ -15,6 +15,7 @@
 #include "painter/bounding_box_painter.h"
 #include "painter/axis_painter.h"
 #include "painter/rotation_center_painter.h"
+#include "painter/plane_fit_ring_painter.h"
 #include "../src/core/node.h"
 
 #include "imgui.h"
@@ -57,6 +58,7 @@ int main(int argc, char** argv) {
     mgr.addPainter(std::make_unique<BoundingBoxPainter>());
     mgr.addPainter(std::make_unique<AxisPainter>());
     mgr.addPainter(std::make_unique<RotationCenterPainter>());
+    mgr.addPainter(std::make_unique<PlaneFitRingPainter>());
 
     vec3d center = {
         (bbMin.x + bbMax.x) * 0.5,
@@ -75,6 +77,7 @@ int main(int argc, char** argv) {
     window.viewport().addLayer(std::move(layer));
     window.viewport().addCamera(std::move(camera));
     window.viewport().setController(std::move(controller));
+    window.viewport().setPickAssistLoader(dataset.get());
 
     static float pointSize = 2.f;
     window.setPropertiesCallback([] {

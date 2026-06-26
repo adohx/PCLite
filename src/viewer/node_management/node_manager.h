@@ -3,7 +3,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include "mat.h"
+#include "vec3.h"
 
 struct Node;
 class Camera;
@@ -36,6 +38,15 @@ public:
 
     // Forwards to every painter's setHighlight (see Painter::setHighlight).
     void setHighlight(Node* node, int pointIndex);
+
+    // Forwards to every painter's setPlaneFit (see Painter::setPlaneFit).
+    void setPlaneFit(bool active, const vec3f& center, const vec3f& normal, float radius);
+
+    // Currently-loaded (resident, in the active painter set) nodes whose
+    // tight bounding box comes within `radius` of `point` -- used to gather
+    // cross-node neighbor candidates for pick-assist plane fitting, since a
+    // single node's own KD-tree only knows about its own points.
+    std::vector<Node*> nodesNear(const vec3d& point, double radius) const;
 
 private:
     class NodeManagerPrivate;

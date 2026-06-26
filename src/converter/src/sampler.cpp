@@ -10,6 +10,7 @@
 #include "attribute_handler/attribute_handler.h"
 #include "attribute_handler/attribute_handler_registry.h"
 #include "concurrent_writer.h"
+#include "kdtree.h"
 #include "octree_naming.h"
 
 namespace {
@@ -32,6 +33,24 @@ void appendHierarchyRecord(std::vector<uint8_t> &out, const std::shared_ptr<Node
     std::memcpy(out.data() + base + 2, &node->numPoints_, 4);
     std::memcpy(out.data() + base + 6, &node->address_,  8);
     std::memcpy(out.data() + base + 14, &node->byteSize_, 8);
+}
+
+// Serialise a name -> (offset, size) lookup record for `node`'s KD-tree blob
+// in "kdtree.bin". Format: [uint8 nameLen][name bytes][uint64 offset][uint64 size].
+// Unlike the hierarchy records, this isn't routed through the stepSize
+// batch/header files -- every onNodeComplete call appends straight to one
+// flat "kdtree_index.bin", since the viewer just loads the whole thing into
+// a name->location hashmap once at dataset open and doesn't need BFS order.
+void appendKdtreeIndexRecord(std::vector<uint8_t> &out, const std::string &name,
+                             uint64_t offset, uint64_t size) {
+    auto nameLen = static_cast<uint8_t>(std::min(name.size(), size_t(255)));
+    out.push_back(nameLen);
+    out.insert(out.end(), name.begin(), name.begin() + nameLen);
+
+    size_t base = out.size();
+    out.resize(base + 16);
+    std::memcpy(out.data() + base + 0, &offset, 8);
+    std::memcpy(out.data() + base + 8, &size,   8);
 }
 
 // Recursively buckets nodes into a new hierarchy batch every `stepSize`
@@ -81,10 +100,26 @@ void Sampler::onNodeComplete(const std::shared_ptr<Node> &node,
                         ? static_cast<uint32_t>(accepted.size() / rowStride_)
                         : 0;
 
+    std::vector<vec3f> positions(node->numPoints_);
     for (uint32_t i = 0; i < node->numPoints_; ++i) {
         double pos[3] = {};
         posHandler_->decode(accepted.data() + i * rowStride_ + posOffset_, posAttr_, pos);
         node->tightBB_.expand({pos[0], pos[1], pos[2]});
+        positions[i] = vec3f{static_cast<float>(pos[0]), static_cast<float>(pos[1]), static_cast<float>(pos[2])};
+    }
+
+    // 1b. Build this node's KD-tree from its own final point set (built once,
+    // offline, here -- the viewer never rebuilds it, just deserializes the
+    // bytes) and write it to "kdtree.bin", recording a name-indexed lookup
+    // entry in "kdtree_index.bin".
+    if (!positions.empty()) {
+        KDTree3 tree;
+        tree.build(positions);
+        ConcurrentWriter::WriteResult kr = writer_->append("kdtree.bin", tree.serialize());
+
+        std::vector<uint8_t> indexRecord;
+        appendKdtreeIndexRecord(indexRecord, node->name_, kr.offset, kr.size);
+        writer_->append("kdtree_index.bin", indexRecord);
     }
 
     // 2. Compute childMask and type

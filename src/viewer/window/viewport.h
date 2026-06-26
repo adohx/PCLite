@@ -3,11 +3,15 @@
 
 #include "window.h"
 #include "camera/camera_controller.h"
+#include "pclite_thread_pool.h"
 #include "vec3.h"
 #include <cstdint>
+#include <future>
 #include <memory>
 
 struct Node;
+class Layer;
+class PointCloudLoader;
 
 // Renders the point-cloud scene into an offscreen texture (rather than
 // directly to the screen) so MainWindow can display it inside a dockable
@@ -26,6 +30,13 @@ public:
         vec3f position{};
     };
     const PickResult& lastPick() const { return lastPick_; }
+
+    // Concrete loader used to fetch full-resolution leaf data for pick-assist
+    // plane-fit refinement (see queryFinestLeafAt). Not the generic
+    // NodeLoader<Node> interface, since this needs PointCloudLoader's
+    // specific file-format knowledge; set once by the app at startup with
+    // the same loader instance it gave to the LOD strategy.
+    void setPickAssistLoader(PointCloudLoader* loader) { pickAssistLoader_ = loader; }
 
     void render() override;
     void onResize(int w, int h) override;
@@ -72,6 +83,25 @@ private:
 
     PickResult lastPick_;
 
+    // Pick-assist plane fit (the ring indicator): computed in two passes.
+    // pick() does an immediate fit from whatever's currently resident
+    // (cheap, in-memory only, but precision follows the current LOD); a
+    // background task then descends to the actual full-resolution leaf
+    // node under the cursor and refines the result a frame or two later.
+    // See [[project_point_picking]] for why two passes instead of one.
+    struct PendingRefinement {
+        uint64_t generation = 0; // discarded if a newer pick() happened meanwhile
+        bool valid = false;
+        Layer* layer = nullptr;
+        vec3f center{}, normal{};
+        float radius = 0.f;
+    };
+
+    uint64_t pickGeneration_ = 0;
+    std::future<PendingRefinement> pendingRefinement_;
+    PCLiteThreadPool refinementPool_{1};
+    PointCloudLoader* pickAssistLoader_ = nullptr;
+
     void resizeFBO(int w, int h);
     void destroyFBO();
 
@@ -79,6 +109,11 @@ private:
     // the nearest non-empty pixel, updating lastPick_ and the highlighted
     // point on every layer.
     void pick(float x, float y);
+
+    // Applies pendingRefinement_ if it has finished and is still relevant
+    // (i.e. no newer pick() happened since it was launched). Called once
+    // per frame from update().
+    void applyPendingRefinement();
 };
 
 #endif // PCLITE_VIEWPORT_H

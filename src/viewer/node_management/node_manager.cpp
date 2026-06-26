@@ -95,3 +95,18 @@ void NodeManager::setHighlight(Node* node, int pointIndex) {
     for (auto& painter : d_->painters_)
         painter->setHighlight(node, pointIndex);
 }
+
+void NodeManager::setPlaneFit(bool active, const vec3f& center, const vec3f& normal, float radius) {
+    for (auto& painter : d_->painters_)
+        painter->setPlaneFit(active, center, normal, radius);
+}
+
+std::vector<Node*> NodeManager::nodesNear(const vec3d& point, double radius) const {
+    std::vector<Node*> result;
+    for (Node* node : d_->inPainters_) {
+        vec3d d = node->tightBB_ - point;
+        if (d.x * d.x + d.y * d.y + d.z * d.z <= radius * radius)
+            result.push_back(node);
+    }
+    return result;
+}

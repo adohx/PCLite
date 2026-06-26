@@ -13,7 +13,6 @@ public:
 
     virtual bool load(std::shared_ptr<T> node) = 0;
     virtual std::shared_ptr<T> loadRoot() =0;
-
 };
 
 #endif //PCLITE_NODE_LOADER_H
