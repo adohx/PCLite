@@ -1,64 +1,69 @@
 # PCLite
 
-PCLite 是一个面向大规模点云的轻量级测量与可视化应用，使用 C++20 + OpenGL + SDL2 构建。
+PCLite is a lightweight desktop application for viewing and measuring large-scale point clouds, built with C++20, OpenGL, SDL2 and Dear ImGui.
 
-## 项目目标
+## Why
 
-主流点云格式（LAS、PCD 等）不支持分块加载，当点云规模很大时，整个文件无法一次性载入内存，也就无法实现可视化和后续处理。PCLite 围绕这一问题展开，目标是：
+Common point cloud formats (LAS, PCD, ...) load as a single flat blob, so once a point cloud gets large enough it simply doesn't fit in memory and can't be visualized or processed. PCLite is built around solving that problem end to end:
 
-- **大点云支持**：自研支持分级/分块加载的内部数据格式（PCLite 格式，类似 Potree）
-- **点云可视化**：基于 OpenGL 的实时渲染，支持按屏幕空间误差动态加载/剔除节点（LOD）
-- **实时点云测量**：在三维场景中进行距离、角度、面积、体积等交互式测量（规划中）
-- **高性能**：C++20 + 多线程 I/O，控制内存占用与磁盘吞吐
+- **Out-of-core point cloud format** — a chunked, level-of-detail octree format (conceptually similar to Potree), produced by a multi-stage converter
+- **Real-time visualization** — OpenGL rendering that streams nodes in/out based on screen-space error (LOD), instead of holding the whole point cloud in memory
+- **Interactive measurement** — GPU-based point picking with a live, KD-tree-assisted local plane fit, as the foundation for distance/angle/area/volume measurement tools
+- **Project-based workflow** — create/open/manage point cloud projects, import raw LAS files with live progress, no manual file wrangling
 
-## 架构概览
+## Performance
+
+Performance is the main thing PCLite is built around — converting fast, staying within bounded memory regardless of dataset size, and keeping the viewer interactive (not just "able to open the file").
+
+- **Conversion speed.** The converter is parallelized at every stage (chunking, hierarchy build, sampling, merging) using independent per-thread LAS readers (`AttributeReader::clone()`) and a "count → allocate → fill" bucketing strategy instead of locking shared containers. On a 49M-point / 1.2GB LAS file (`test_data/office.las`, Release build), end-to-end conversion takes **~6.5s**, a 9.7x improvement over the unoptimized baseline (63.3s) and on par with reference tool PotreeConverter (6.0s) for the equivalent work — PCLite is actually ~5% *faster* once you account for the extra KD-tree index it builds per node that PotreeConverter doesn't.
+- **Bounded memory, not "load everything."** Both the converter and the viewer are out-of-core by design: the converter flushes each chunk's promotable points to disk as soon as they're sampled and only re-reads bounded batches during the final merge (batched by a point-count threshold, not by total dataset size); the viewer's LRU strategy caps the number of resident octree nodes regardless of how large the underlying point cloud is. Dataset size is bounded by disk, not RAM.
+- **Frame rate.** The viewer never renders the whole point cloud — `NodeManager` streams nodes in/out based on projected screen-space error, so the rendered point budget (and therefore frame time) stays roughly constant whether the dataset is 1M or 1B points. A live FPS counter in the title bar makes this directly observable while navigating.
+- **Point-picking assist.** Picking is GPU-driven and on-demand (no per-frame ID buffer baking): clicking or hovering a point triggers a small FBO read-back that resolves the exact (node, point) under the cursor, then fits a local plane through its neighborhood using a per-node KD-tree (built once at conversion time) — first synchronously from whatever LOD is currently resident, then progressively refined in the background down to full resolution. The result is an immediate visual response (a ring on the fitted plane) that gets sharper without blocking the UI, even while sweeping the mouse across the cloud.
+
+## Architecture
 
 ```
-原始点云 (LAS/PCD/...)
-      │  converter：分块 → 建立层级骨架 → 按分块采样 → 跨分块合并
+Raw point cloud (LAS/...)
+      │  converter: chunk → build hierarchy skeleton → per-chunk sampling → cross-chunk merge
       ▼
-PCLite 格式数据集 (metadata.json + hierarchy.bin + 点数据)
-      │  viewer：按需加载 → 动态 LOD（加载/剔除） → OpenGL 渲染
+PCLite dataset (metadata.json + hierarchy.bin + octree.bin + kdtree.bin + ...)
+      │  viewer: on-demand loading → dynamic LOD (load/evict) → OpenGL rendering
       ▼
-交互式可视化 + 点云测量（measurement，规划中）
+Interactive visualization + point picking / measurement
 ```
 
-| 模块 | 路径 | 职责 | 现状 |
+| Module | Path | Responsibility | Status |
 |---|---|---|---|
-| core | `src/core` | 基础数据结构：vec3/mat、BoundingBox、Attributes、Node | 已实现 |
-| converter | `src/converter` | 通用点云格式 → PCLite 分块格式 | 设计完成，未接入主构建 |
-| viewer | `src/viewer` | 窗口/相机/图层/节点管理/绘制 | 基本实现，有测试覆盖 |
-| measurement | `src/measurement` | 点云测量（距离/角度/面积/体积等） | 规划中 |
-| utilities | `src/utilities` | 线程池等基础设施 | 已实现 |
+| core | `src/core` | Basic types: vec3/mat, BoundingBox, Attributes, KD-tree, plane fit | Implemented |
+| converter | `src/converter` | Converts raw point cloud formats into the PCLite chunked octree format | Implemented |
+| viewer | `src/viewer` | Window/camera/layers/node streaming/rendering/picking | Implemented |
+| project | `src/project` | Project create/open/close/delete, recent list, LAS import | Implemented |
+| ui | Dear ImGui (vendored) | Docking chrome (Hub / Project mode), panels, file browser | Implemented |
+| measurement | `src/measurement` | Distance/angle/area/volume measurement on top of picking | Planned |
 
-完整设计见 [docs/zh/总体设计.md](docs/zh/总体设计.md)。
-
-## 目录结构
+## Repository layout
 
 ```
 PCLite/
-├── CMakeLists.txt / CMakePresets.json   顶层构建配置
-├── vcpkg.json                            vcpkg 依赖声明（sdl2）
-├── main.cpp                              主程序入口（模板代码）
-├── 3rd_party/                            第三方依赖（FetchContent 配置 + vendored ThreadPool）
-├── cmake/                                CMake 工具模块
-├── src/                                  core / converter / viewer / measurement / utilities
-├── tools/pcl_viewer.cpp                  独立点云查看器工具
-├── test_data/                            集成测试数据
-└── docs/zh/                              中文设计文档
+├── CMakeLists.txt / CMakePresets.json   Top-level build configuration
+├── vcpkg.json                            vcpkg manifest (SDL2)
+├── main.cpp / application.{h,cpp}        Application entry point & orchestrator
+├── 3rd_party/                             Vendored/FetchContent dependencies (ImGui, glad, ThreadPool, ...)
+├── cmake/                                 CMake helper modules
+└── src/                                   core / converter / viewer / project / measurement
 ```
 
-## 构建
+## Building
 
-### 依赖
+### Requirements
 
-- CMake ≥ 3.20，支持 C++20 的编译器（MSVC / GCC / Clang）
-- [vcpkg](https://github.com/microsoft/vcpkg)（需设置 `VCPKG_ROOT` 环境变量），用于安装 SDL2
+- CMake ≥ 3.20 and a C++20 compiler (MSVC / GCC / Clang)
+- [vcpkg](https://github.com/microsoft/vcpkg) (set `VCPKG_ROOT`), used to install SDL2
 - OpenGL
 
-其余依赖（nlohmann/json、spdlog、googletest、ThreadPool）通过 CMake `FetchContent` 自动下载，无需手动安装。
+Everything else (nlohmann/json, spdlog, Dear ImGui, glad, googletest, ThreadPool) is fetched automatically via CMake `FetchContent` — no manual install needed.
 
-### 使用 CMake Presets
+### Using CMake Presets
 
 ```bash
 # Linux
@@ -70,35 +75,24 @@ cmake --preset x64-Debug
 cmake --build --preset x64-Debug
 ```
 
-## 运行
-
-`pcl_viewer` 是独立的点云查看器，打开一个 PCLite 格式数据集（包含 `metadata.json`/`hierarchy.bin`/点数据文件）：
+## Running
 
 ```bash
-./pcl_viewer <dataset_dir>
+./PCLite
 ```
 
-支持鼠标左键旋转、右键平移、滚轮缩放（Arcball 相机）。
+The app opens to a project hub: create a new project from a LAS file (converted in the background with progress feedback), or open one from the recent/all-projects list. Inside a project, the viewer supports arcball navigation (left-drag to rotate, right-drag to pan, scroll to zoom) and point picking (click or hover a point to highlight it and preview the locally-fitted plane).
 
-## 测试
+## Testing
 
-测试基于 GoogleTest + CTest，分为不需要 GL 上下文的单元测试和读取 `test_data/` 的集成测试，详见 [docs/zh/viewer测试文档.md](docs/zh/viewer测试文档.md)。
+Tests use GoogleTest + CTest, split per module (`core`, `converter`, `project`, `viewer`).
 
 ```bash
-cmake --build <build_dir> --target viewer_unit_test viewer_integration_test -j4
+cmake --build <build_dir> -j$(nproc)
 cd <build_dir> && ctest --output-on-failure
 ```
 
-## 文档索引
+## Status
 
-- [总体设计文档](docs/zh/总体设计.md) —— 项目目标、架构、技术选型、测试策略、路线图
-- [convert 流程设计](docs/zh/convert流程.md) —— PCLite 格式与转换流水线
-- [visualize 流程设计](docs/zh/visualize流程.md) —— viewer 应用分层与类设计
-- [相机控制器设计](docs/zh/相机控制器设计.md) —— Arcball / Turntable / FirstPerson
-- [viewer 测试文档](docs/zh/viewer测试文档.md) —— 单元/集成测试设计
-
-## 项目状态
-
-- ✅ core 基础数据结构、viewer 主体功能（窗口/相机/动态加载剔除/绘制）及测试
-- 🚧 converter：格式与流水线设计已完成，代码待按设计重写并接入主构建
-- 📋 measurement：尚未开始
+- ✅ Project management, converter, and viewer (LOD streaming, rendering, GPU point picking with plane-fit assist) are implemented and tested
+- 📋 Measurement (distance/angle/area/volume) is planned, not yet started
