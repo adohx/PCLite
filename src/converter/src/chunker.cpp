@@ -6,20 +6,25 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <limits>
-#include <unordered_map>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
+#include "attribute_handler/attribute_codec.h"
 #include "attribute_handler/attribute_handler.h"
 #include "attribute_handler/attribute_handler_registry.h"
 #include "attribute_handler/classification_attribute_handler.h"
 #include "attribute_reader/attribute_reader.h"
 #include "concurrent_writer.h"
 #include "octree_naming.h"
+#include "pclite_thread_pool.h"
 
 namespace {
 
@@ -153,27 +158,48 @@ uint32_t Chunker::calculateGridSize(uint64_t totalPoints) const {
 }
 
 std::vector<int64_t> Chunker::countPointsInCells(uint32_t gridSize) const {
+    // A dense grid (up to 512^3 cells) is too large to replicate per thread,
+    // so threads increment one shared grid of atomics instead of merging
+    // per-thread copies — cells are independent counters, so relaxed
+    // fetch_add is enough (no ordering between cells is required).
     uint64_t numCells = static_cast<uint64_t>(gridSize) * gridSize * gridSize;
-    std::vector<int64_t> grid(numCells, 0);
+    std::vector<std::atomic<int64_t>> grid(numCells);
+    for (auto &cell : grid) cell.store(0, std::memory_order_relaxed);
 
     constexpr int64_t kBatchSize = 1'000'000;
+    size_t numThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
+    PCLiteThreadPool pool(numThreads);
 
+    // One task per ~1M-point batch across the WHOLE file, all submitted to
+    // the pool up front (not one batch read at a time on the calling
+    // thread): each task clones its own reader (see AttributeReader::clone)
+    // so the actual disk read + LAS/LAZ decode for different batches runs
+    // truly concurrently, instead of funnelling through one reader's
+    // sequential seek/read cursor. Matches PotreeConverter's per-task
+    // laszip_POINTER instances.
     for (auto &reader : readers_) {
         auto info = reader->headerInfo();
         uint64_t total = std::max<uint64_t>(info.numPoints_, info.extendedNumPoints_);
 
+        std::vector<std::future<void>> futures;
         for (uint64_t start = 0; start < total; start += kBatchSize) {
             int64_t count = static_cast<int64_t>(std::min<uint64_t>(kBatchSize, total - start));
-            std::vector<vec3d> positions = reader->readPositions(start, count);
 
-            for (const vec3d &p : positions) {
-                uint64_t idx = octree_naming::cellIndex(p, aabb_, gridSize);
-                ++grid[idx];
-            }
+            futures.push_back(pool.enqueue([&reader, &grid, this, gridSize, start, count]() {
+                std::shared_ptr<AttributeReader> myReader = reader->clone();
+                std::vector<vec3d> positions = myReader->readPositions(start, count);
+                for (const vec3d &p : positions) {
+                    uint64_t idx = octree_naming::cellIndex(p, aabb_, gridSize);
+                    grid[idx].fetch_add(1, std::memory_order_relaxed);
+                }
+            }));
         }
+        for (auto &f : futures) f.get();
     }
 
-    return grid;
+    std::vector<int64_t> result(numCells);
+    for (uint64_t i = 0; i < numCells; ++i) result[i] = grid[i].load(std::memory_order_relaxed);
+    return result;
 }
 
 void Chunker::buildChunksAndLut(const std::vector<int64_t> &grid, uint32_t gridSize,
@@ -287,6 +313,19 @@ bool Chunker::distributePoints(const std::vector<int32_t> &lut, uint32_t gridSiz
         Attribute *dstAttr;
     };
 
+    size_t numThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
+    PCLiteThreadPool pool(numThreads);
+
+    // chunks_[*].numPoints is written from many tasks (one per batch, see
+    // below) potentially running on different threads; accumulate into a
+    // shared atomic array and fold it back into chunks_ once after every
+    // reader/batch has finished, instead of racing on chunks_[idx].numPoints
+    // directly.
+    size_t numChunks = chunks_.size();
+    std::vector<std::atomic<uint64_t>> chunkPointCounts(numChunks);
+    for (auto &c : chunkPointCounts) c.store(0, std::memory_order_relaxed);
+
+
     for (auto &reader : readers_) {
         Attributes srcAttrs = reader->getAttributes();
         uint64_t srcRowBytes = srcAttrs.getTotalBytes();
@@ -309,49 +348,122 @@ bool Chunker::distributePoints(const std::vector<int32_t> &lut, uint32_t gridSiz
 
         auto info = reader->headerInfo();
         uint64_t total = std::max<uint64_t>(info.numPoints_, info.extendedNumPoints_);
+        if (total == 0) continue;
 
-        for (uint64_t start = 0; start < total; start += kBatchSize) {
-            int64_t count = static_cast<int64_t>(std::min<uint64_t>(kBatchSize, total - start));
-            std::vector<uint8_t> rawRows = reader->readRawData(start, count);
+        size_t numBatches = static_cast<size_t>((total + kBatchSize - 1) / kBatchSize);
 
-            std::vector<uint8_t> dstBuf(static_cast<size_t>(count) * dstRowBytes);
-            std::vector<int32_t> chunkIdx(static_cast<size_t>(count));
-
-            for (int64_t i = 0; i < count; ++i) {
-                const uint8_t *srcRow = rawRows.data() + static_cast<uint64_t>(i) * srcRowBytes;
-                uint8_t *dstRow = dstBuf.data() + static_cast<uint64_t>(i) * dstRowBytes;
-
-                double pos[3];
-                posHandler->decode(srcRow + srcPosOffset, srcPosAttr, pos);
-                vec3d p{pos[0], pos[1], pos[2]};
-
-                uint64_t cell = octree_naming::cellIndex(p, aabb_, gridSize);
-                chunkIdx[i] = lut[cell];
-
-                for (auto &plan : plans) {
-                    plan.handler->encode(dstRow + plan.dstOffset, srcRow + plan.srcOffset,
-                                          plan.srcAttr, *plan.dstAttr);
-                }
-            }
-
-            for (auto &plan : plans) {
-                plan.handler->updateStats(*plan.dstAttr, dstBuf.data() + plan.dstOffset,
-                                           static_cast<uint64_t>(count), dstRowBytes);
-            }
-
-            std::unordered_map<int32_t, std::vector<uint8_t>> perChunk;
-            for (int64_t i = 0; i < count; ++i) {
-                int32_t idx = chunkIdx[i];
-                const uint8_t *row = dstBuf.data() + static_cast<uint64_t>(i) * dstRowBytes;
-                std::vector<uint8_t> &buf = perChunk[idx];
-                buf.insert(buf.end(), row, row + dstRowBytes);
-                chunks_[idx].numPoints += 1;
-            }
-
-            for (auto &[idx, buf] : perChunk) {
-                writer_->append("chunks/" + chunks_[idx].name + ".bin", buf);
+        // updateStats() mutates its Attribute argument's min_/max_/histogram_
+        // in place, so calling it concurrently on the shared *plan.dstAttr
+        // would race. Instead, each batch task accumulates into its own
+        // zero/inf-initialized copy of dstAttr (only min_/max_/histogram_ are
+        // reset — scale_/offset_/type_ stay correct, since those are what
+        // updateStats reads to decode each row), then the per-batch results
+        // are folded into *plan.dstAttr serially once all batches finish.
+        std::vector<std::vector<Attribute>> localStats(plans.size());
+        for (size_t p = 0; p < plans.size(); ++p) {
+            localStats[p].assign(numBatches, *plans[p].dstAttr);
+            for (auto &local : localStats[p]) {
+                local.min_ = {kInf, kInf, kInf};
+                local.max_ = {-kInf, -kInf, -kInf};
+                std::fill(local.histogram_.begin(), local.histogram_.end(), 0);
             }
         }
+
+        // One task per ~1M-point batch across the WHOLE reader, all
+        // submitted up front rather than read one batch at a time on the
+        // calling thread. Each task clones its own reader (AttributeReader::
+        // clone) so the disk read + LAS/LAZ decode for different batches
+        // actually runs concurrently instead of funnelling through one
+        // reader's sequential seek/read cursor, and is otherwise fully
+        // self-contained (encode, local stats, local chunk-grouping, write)
+        // so memory stays bounded to the in-flight batches rather than the
+        // whole file. Matches PotreeConverter's per-task laszip_POINTER
+        // instances (Converter/src/chunker_countsort_laszip.cpp).
+        std::vector<std::future<void>> futures;
+        futures.reserve(numBatches);
+        size_t batchIdx = 0;
+        for (uint64_t start = 0; start < total; start += kBatchSize, ++batchIdx) {
+            int64_t count = static_cast<int64_t>(std::min<uint64_t>(kBatchSize, total - start));
+
+            futures.push_back(pool.enqueue([&, batchIdx, start, count]() {
+                std::shared_ptr<AttributeReader> myReader = reader->clone();
+                std::vector<uint8_t> rawRows = myReader->readRawData(start, count);
+
+                std::vector<uint8_t> dstBuf(static_cast<size_t>(count) * dstRowBytes);
+                std::vector<int32_t> chunkIdx(static_cast<size_t>(count));
+
+                for (int64_t i = 0; i < count; ++i) {
+                    const uint8_t *srcRow = rawRows.data() + static_cast<uint64_t>(i) * srcRowBytes;
+                    uint8_t *dstRow = dstBuf.data() + static_cast<uint64_t>(i) * dstRowBytes;
+
+                    double pos[3];
+                    posHandler->decode(srcRow + srcPosOffset, srcPosAttr, pos);
+                    vec3d p{pos[0], pos[1], pos[2]};
+
+                    uint64_t cell = octree_naming::cellIndex(p, aabb_, gridSize);
+                    chunkIdx[i] = lut[cell];
+
+                    // Stats are folded in right after each attribute is
+                    // encoded — dstRow is still hot in cache at this point —
+                    // instead of a second full pass over dstBuf afterwards
+                    // that re-reads everything once it's gone cold.
+                    for (size_t p = 0; p < plans.size(); ++p) {
+                        AttributePlan &plan = plans[p];
+                        uint8_t *attrDst = dstRow + plan.dstOffset;
+                        plan.handler->encode(attrDst, srcRow + plan.srcOffset, plan.srcAttr, *plan.dstAttr);
+                        plan.handler->updateStats(localStats[p][batchIdx], attrDst, 1, dstRowBytes);
+                    }
+                }
+
+                // Grouping via counting sort: count how many of this batch's
+                // rows land in each chunk, allocate each touched chunk's
+                // buffer once at its exact final size, then copy — no hash
+                // map, no incremental vector growth (vs. PotreeConverter's
+                // count/allocate/copy bucketing).
+                std::vector<int64_t> localCounts(numChunks, 0);
+                for (int64_t i = 0; i < count; ++i) ++localCounts[chunkIdx[i]];
+
+                std::vector<std::vector<uint8_t>> chunkBufs(numChunks);
+                for (size_t c = 0; c < numChunks; ++c) {
+                    if (localCounts[c] > 0) chunkBufs[c].resize(static_cast<size_t>(localCounts[c]) * dstRowBytes);
+                }
+
+                std::vector<int64_t> cursor(numChunks, 0);
+                for (int64_t i = 0; i < count; ++i) {
+                    int32_t idx = chunkIdx[i];
+                    const uint8_t *row = dstBuf.data() + static_cast<uint64_t>(i) * dstRowBytes;
+                    uint8_t *dstSlot = chunkBufs[idx].data() + static_cast<uint64_t>(cursor[idx]) * dstRowBytes;
+                    std::memcpy(dstSlot, row, dstRowBytes);
+                    ++cursor[idx];
+                }
+
+                for (size_t idx = 0; idx < numChunks; ++idx) {
+                    if (localCounts[idx] == 0) continue;
+                    chunkPointCounts[idx].fetch_add(static_cast<uint64_t>(localCounts[idx]), std::memory_order_relaxed);
+                    writer_->append("chunks/" + chunks_[idx].name + ".bin", chunkBufs[idx]);
+                }
+            }));
+        }
+        for (auto &f : futures) f.get();
+
+        for (size_t p = 0; p < plans.size(); ++p) {
+            Attribute &dst = *plans[p].dstAttr;
+            for (const Attribute &local : localStats[p]) {
+                for (int c = 0; c < dst.numElements_; ++c) {
+                    double lo = attribute_codec::component(local.min_, c);
+                    double hi = attribute_codec::component(local.max_, c);
+                    if (lo < attribute_codec::component(dst.min_, c)) attribute_codec::setComponent(dst.min_, c, lo);
+                    if (hi > attribute_codec::component(dst.max_, c)) attribute_codec::setComponent(dst.max_, c, hi);
+                }
+                for (size_t i = 0; i < dst.histogram_.size(); ++i) {
+                    dst.histogram_[i] += local.histogram_[i];
+                }
+            }
+        }
+    }
+
+    for (size_t c = 0; c < numChunks; ++c) {
+        chunks_[c].numPoints += chunkPointCounts[c].load(std::memory_order_relaxed);
     }
 
     return true;

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 #include "attribute_handler/attribute_handler.h"
 #include "attribute_handler/attribute_handler_registry.h"
 #include "concurrent_writer.h"
@@ -53,21 +54,22 @@ void appendKdtreeIndexRecord(std::vector<uint8_t> &out, const std::string &name,
     std::memcpy(out.data() + base + 8, &size,   8);
 }
 
-// Recursively buckets nodes into a new hierarchy batch every `stepSize`
-// levels of depth (matching PotreeConverter's hierarchyStepSize behaviour),
-// not just once below the root: a node at depth D belongs to the batch
-// rooted at depth floor(D/stepSize)*stepSize, keyed by the name of the node
-// at that depth. The node at the batch's own deepest level (depth a
-// multiple of stepSize) always starts its own batch, even if it's a leaf,
-// since rebuildIndex() always emits a matching Proxy stub for it in the
-// parent batch.
+// Buckets nodes into exactly one extra hierarchy batch below the root, at
+// depth stepSize — not recursively at every multiple of stepSize. Matches
+// PotreeConverter's actual HierarchyFlusher::write (Converter/include/
+// indexer.h): its grouping key is always name.substr(0, stepSize+1),
+// regardless of how much deeper the node actually is, so an entire subtree
+// rooted at depth stepSize lands in one file no matter how deep it goes.
+// rebuildIndex() relies on this: it only needs to emit Proxy stubs in the
+// root batch (pointing at each depth-stepSize batch file), never inside a
+// batch file itself, since nothing below depth stepSize ever lives in a
+// separate file.
 std::string headerPath(const std::string &nodeName, uint32_t stepSize) {
     uint32_t depth = static_cast<uint32_t>(nodeName.size()) - 1; // "r" => depth 0
-    uint32_t batchStartDepth = (depth / stepSize) * stepSize;
-    if (batchStartDepth == 0) {
+    if (depth < stepSize) {
         return "chunks/r.header.bin";
     }
-    return "chunks/" + nodeName.substr(0, batchStartDepth + 1) + ".header.bin";
+    return "chunks/" + nodeName.substr(0, stepSize + 1) + ".header.bin";
 }
 
 } // namespace
@@ -130,10 +132,49 @@ void Sampler::onNodeComplete(const std::shared_ptr<Node> &node,
     node->childMask_ = mask;
     node->type_ = (mask == 0) ? NodeType::Leaf : NodeType::Normal;
 
-    // 3. Write 22-byte hierarchy record to the appropriate header file
+    // 3. Queue the 22-byte hierarchy record for the appropriate header file
+    // (batched and flushed via queueHeaderWrite(), not written immediately).
     std::vector<uint8_t> record;
     appendHierarchyRecord(record, node);
-    writer_->append(headerPath(node->name_, options_.stepSize), record);
+    queueHeaderWrite(headerPath(node->name_, options_.stepSize), std::move(record));
+}
+
+void Sampler::queueHeaderWrite(std::string path, std::vector<uint8_t> bytes) {
+    std::vector<PendingHeaderWrite> toFlush;
+    {
+        std::lock_guard<std::mutex> lock(headerMutex_);
+        pendingHeaderWrites_.push_back({std::move(path), std::move(bytes)});
+        if (pendingHeaderWrites_.size() < kHeaderFlushThreshold) return;
+        toFlush = std::move(pendingHeaderWrites_);
+        pendingHeaderWrites_.clear();
+    }
+    flushHeaderWrites(toFlush);
+}
+
+void Sampler::flushPendingHeaderWrites() {
+    std::vector<PendingHeaderWrite> toFlush;
+    {
+        std::lock_guard<std::mutex> lock(headerMutex_);
+        toFlush = std::move(pendingHeaderWrites_);
+        pendingHeaderWrites_.clear();
+    }
+    flushHeaderWrites(toFlush);
+}
+
+void Sampler::flushHeaderWrites(const std::vector<PendingHeaderWrite> &writes) {
+    if (writes.empty()) return;
+
+    // Group by target path first so each path is opened/appended/closed once
+    // per flush, not once per record.
+    std::unordered_map<std::string, std::vector<uint8_t>> grouped;
+    for (const PendingHeaderWrite &w : writes) {
+        std::vector<uint8_t> &buf = grouped[w.path];
+        buf.insert(buf.end(), w.bytes.begin(), w.bytes.end());
+    }
+
+    for (auto &[path, buf] : grouped) {
+        writer_->appendAndClose(path, buf);
+    }
 }
 
 // ── RandomSampler ─────────────────────────────────────────────────────────────

@@ -22,6 +22,11 @@ public:
     std::vector<uint8_t> readRawData(uint64_t index, int64_t count) override;
     ReaderType getType() override { return LAS; }
 
+    // LASzip reads via one sequential seek/read cursor per laszip_POINTER,
+    // serialized by mutex_ below — concurrent callers need their own
+    // instance each, so reopen the same file instead of sharing this one.
+    std::shared_ptr<AttributeReader> clone() const override { return createReader(path_); }
+
 private:
     void buildAttributes();
     vec3d decodeCurrentPosition() const;

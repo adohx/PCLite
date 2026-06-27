@@ -55,6 +55,34 @@ ConcurrentWriter::WriteResult ConcurrentWriter::append(const std::string &relati
     return result;
 }
 
+void ConcurrentWriter::appendAndClose(const std::string &relativePath, const std::vector<uint8_t> &data) {
+    std::mutex *pathMutex;
+    {
+        std::lock_guard<std::mutex> lock(ephemeralRegistryMutex_);
+        auto it = ephemeralMutexes_.find(relativePath);
+        if (it == ephemeralMutexes_.end()) {
+            it = ephemeralMutexes_.emplace(relativePath, std::make_unique<std::mutex>()).first;
+        }
+        pathMutex = it->second.get();
+    }
+
+    std::lock_guard<std::mutex> lock(*pathMutex);
+
+    auto path = fullPath(relativePath);
+    auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent);
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    if (!out) {
+        throw std::runtime_error("ConcurrentWriter: failed to open '" + path + "' for append");
+    }
+    if (!data.empty()) {
+        out.write(reinterpret_cast<const char *>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+}
+
 std::future<ConcurrentWriter::WriteResult> ConcurrentWriter::appendAsync(const std::string &relativePath,
                                                                           std::vector<uint8_t> data) {
     return pool_.enqueue([this, relativePath, data = std::move(data)]() mutable {

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -43,10 +44,17 @@ public:
 
     // Called once per node after doSample(). Writes accepted rows to
     // "octree.bin" (filling node->address_/byteSize_/numPoints_/tightBB_)
-    // and appends a 22-byte hierarchy record to the appropriate
-    // "chunks/<group>.header.bin" (root group vs. batch group per stepSize_).
+    // and queues a 22-byte hierarchy record for the appropriate
+    // "chunks/<group>.header.bin" (root group vs. batch group per stepSize_)
+    // — see queueHeaderWrite().
     void onNodeComplete(const std::shared_ptr<Node> &node,
                         const std::vector<uint8_t> &accepted);
+
+    // Writes whatever hierarchy header records are still buffered (see
+    // queueHeaderWrite()). Must be called once after every onNodeComplete()
+    // call has finished (i.e. after sampling+merging) and before the header
+    // files are read back, e.g. by Indexer::rebuildIndex().
+    void flushPendingHeaderWrites();
 
     // Partition `candidates` into accepted (promoted to this node, to be
     // re-tested by its own parent) and rejected (settles back at whichever
@@ -71,6 +79,27 @@ protected:
     uint64_t posOffset_ = 0;
     Attribute posAttr_;
     const AttributeHandler *posHandler_ = nullptr;
+
+private:
+    // Hierarchy header records (one per finalised node) are batched in
+    // memory and flushed together via ConcurrentWriter::appendAndClose(),
+    // instead of routing each one through ConcurrentWriter::append() (which
+    // would hold one open file handle per distinct batch path — there can be
+    // tens of thousands of them — for the entire sampling/merging phase, and
+    // pay for closing all of them at once in flushAll()). Mirrors
+    // PotreeConverter's HierarchyFlusher (Converter/include/indexer.h).
+    struct PendingHeaderWrite {
+        std::string path;
+        std::vector<uint8_t> bytes; // [uint8 nameLen][name][22-byte record]
+    };
+
+    static constexpr size_t kHeaderFlushThreshold = 10'000;
+
+    void queueHeaderWrite(std::string path, std::vector<uint8_t> bytes);
+    void flushHeaderWrites(const std::vector<PendingHeaderWrite> &writes);
+
+    std::mutex headerMutex_;
+    std::vector<PendingHeaderWrite> pendingHeaderWrites_;
 };
 
 // Keeps every K-th point (uniform stride), rejecting the rest.

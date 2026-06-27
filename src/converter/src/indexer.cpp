@@ -11,8 +11,10 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <numeric>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -21,6 +23,7 @@
 #include "attribute_handler/attribute_handler_registry.h"
 #include "concurrent_writer.h"
 #include "octree_naming.h"
+#include "pclite_thread_pool.h"
 
 static constexpr int kMaxLocalDepth = 10;
 
@@ -425,12 +428,27 @@ bool Indexer::mergeChunks(const std::shared_ptr<Node> &root,
     auto mergeTree = buildMergeTree(root, recordByNode);
     std::vector<MergeTask> tasks = collapseToTasks(mergeTree);
 
+    // Tasks partition the skeleton into disjoint subtrees (collapseToTasks'
+    // invariant: a node either IS a task or recurses into children that
+    // become tasks, never both), so processTask calls never touch the same
+    // Node — same independence indexChunk already relies on to run
+    // concurrently in Converter::doSampling, via the same Sampler/writer_.
+    size_t numThreads = std::max<size_t>(1, std::thread::hardware_concurrency());
+    PCLiteThreadPool pool(numThreads);
+
+    std::vector<std::future<std::vector<uint8_t>>> futures;
+    futures.reserve(tasks.size());
+    for (const MergeTask &task : tasks) {
+        futures.push_back(pool.enqueue([this, &root, &task]() { return processTask(root, task); }));
+    }
+
     std::unordered_set<Node *> taskRootStopNodes;
     std::unordered_map<Node *, std::vector<uint8_t>> taskRootPromotable;
     bool rootHandled = false;
 
-    for (const MergeTask &task : tasks) {
-        std::vector<uint8_t> result = processTask(root, task);
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        std::vector<uint8_t> result = futures[i].get();
+        const MergeTask &task = tasks[i];
         if (task.taskRoot.get() == root.get()) {
             // processTask already called onNodeComplete(root, ...) directly
             // (root has no parent left to test the result further).
@@ -456,6 +474,10 @@ bool Indexer::mergeChunks(const std::shared_ptr<Node> &root,
 bool Indexer::rebuildIndex() {
     namespace fs = std::filesystem;
 
+    // Write out whatever hierarchy header records sampling/merging left
+    // buffered (see Sampler::queueHeaderWrite) before reading them back below.
+    sampler_->flushPendingHeaderWrites();
+
     // Flush writer before reading header files from disk.
     writer_->flushAll();
 
@@ -463,12 +485,11 @@ bool Indexer::rebuildIndex() {
     fs::path rootHeader = chunksDir / "r.header.bin";
 
     // Enumerate batch header files: name is "<batchName>.header.bin" where
-    // batchName != "r" and (batchName.size()-1) is a multiple of stepSize —
-    // i.e. its depth sits exactly on a recursive hierarchy-batch boundary
-    // (stepSize, 2*stepSize, 3*stepSize, ...), matching headerPath()'s
-    // routing. PotreeConverter recurses this batching throughout the whole
-    // tree rather than just once below the root, so this enumerates batches
-    // at every depth, not only the first level.
+    // batchName != "r" and batchName.size()-1 == stepSize — i.e. its depth
+    // sits exactly on the one hierarchy-batch boundary headerPath() ever
+    // creates (matches PotreeConverter's HierarchyFlusher: one flat batch per
+    // depth-stepSize ancestor, holding everything below it no matter how
+    // deep — not a new batch at every recursive multiple of stepSize).
     // path::stem() only strips the final ".bin", leaving ".header" attached
     // (e.g. "r0020.header.bin" -> "r0020.header", 12 chars) so it can never
     // match directly — strip the full ".header.bin" suffix explicitly
@@ -488,7 +509,7 @@ bool Indexer::rebuildIndex() {
                 continue;
             std::string batchName = filename.substr(0, filename.size() - kHeaderSuffix.size());
             if (batchName == "r") continue;
-            if ((static_cast<uint32_t>(batchName.size()) - 1) % options_.stepSize == 0)
+            if (static_cast<uint32_t>(batchName.size()) - 1 == options_.stepSize)
                 batchFiles.push_back(e.path());
         }
         std::sort(batchFiles.begin(), batchFiles.end());
@@ -537,22 +558,20 @@ bool Indexer::rebuildIndex() {
         return a.name < b.name;
     };
 
-    // A batch's own key sits at some depth `keyDepth` (0 for the root batch,
-    // keyed by "r"). Its deepest level (depth == keyDepth+stepSize-1, i.e.
-    // name.size() == keyDepth+stepSize) has children whose names reach one
-    // level deeper, which headerPath() routes to a new batch keyed by that
-    // child's own name — those children have no record in THIS batch even
-    // though childMask says they exist. The viewer's BFS-positional parser
-    // (loadHierarchyChunk) needs a record at that position to know to lazily
-    // fetch the next batch, so insert a placeholder Proxy record per such
-    // child; the patch step below fills in its real address/size once every
-    // batch's offset is known. This mirrors PotreeConverter's recursive
-    // hierarchyStepSize batching, applied at every depth boundary, not just
-    // once below the root.
-    auto insertProxyPlaceholders = [&](std::vector<NamedRecord> &records, size_t keyDepth) {
+    // The root batch (depth 0..stepSize-1) has children at depth stepSize
+    // that live in their own per-ancestor batch file (see headerPath()), so
+    // they have no record in the root batch even though childMask says they
+    // exist. The viewer's BFS-positional parser (loadHierarchyChunk) needs a
+    // record at that position to know to lazily fetch the batch file, so
+    // insert a placeholder Proxy record per such child; the patch step below
+    // fills in its real address/size once every batch's offset is known.
+    // Only the root batch ever needs this — every other (flat) batch file
+    // already holds its entire subtree, so there's no further batch for it
+    // to point to.
+    auto insertRootProxyPlaceholders = [&](std::vector<NamedRecord> &records) {
         std::vector<NamedRecord> proxyPlaceholders;
         for (const auto &rec : records) {
-            if (rec.name.size() != keyDepth + options_.stepSize) continue;
+            if (rec.name.size() != options_.stepSize) continue;
             uint8_t mask = rec.data[1];
             for (int c = 0; c < 8; ++c) {
                 if (!((mask >> c) & 1)) continue;
@@ -569,17 +588,17 @@ bool Indexer::rebuildIndex() {
     // Parse root section.
     auto rootRaw = readFile(rootHeader);
     auto rootRecords = parseNamedSection(rootRaw);
-    insertProxyPlaceholders(rootRecords, 0);
+    insertRootProxyPlaceholders(rootRecords);
     std::sort(rootRecords.begin(), rootRecords.end(), bfsLess);
 
-    // Parse and sort each batch section.
+    // Parse and sort each batch section. Unlike the root section, a batch
+    // file's records never need Proxy placeholders inserted — headerPath()
+    // only creates one batch boundary (at depth stepSize), so every batch
+    // file already holds its entire subtree, however deep it goes.
     std::vector<std::vector<NamedRecord>> batchRecords(batchFiles.size());
     for (size_t i = 0; i < batchFiles.size(); ++i) {
         auto raw = readFile(batchFiles[i]);
         batchRecords[i] = parseNamedSection(raw);
-        std::string filename = batchFiles[i].filename().string();
-        std::string batchName = filename.substr(0, filename.size() - kHeaderSuffix.size());
-        insertProxyPlaceholders(batchRecords[i], batchName.size() - 1);
         std::sort(batchRecords[i].begin(), batchRecords[i].end(), bfsLess);
     }
 
@@ -607,8 +626,12 @@ bool Indexer::rebuildIndex() {
         batchStemToIdx[filename.substr(0, filename.size() - kHeaderSuffix.size())] = i;
     }
 
-    // ── Patch Proxy records in every batch (root + all recursive batches) ─────
-    // Proxy records mark batch-group boundaries; fill in the final offset+size.
+    // ── Patch Proxy records ────────────────────────────────────────────────────
+    // Proxy records (only ever present in rootRecords — see
+    // insertRootProxyPlaceholders) mark batch-group boundaries; fill in the
+    // final offset+size now that every batch's offset is known. Running this
+    // over batchRecords too is a harmless no-op (they never contain Proxy
+    // records), kept so this stays correct if that ever changes.
     auto patchProxies = [&](std::vector<NamedRecord> &records) {
         for (auto &rec : records) {
             if (rec.data[0] != static_cast<uint8_t>(NodeType::Proxy)) continue;

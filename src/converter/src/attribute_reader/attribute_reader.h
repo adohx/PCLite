@@ -12,12 +12,26 @@
 #include "vec3.h"
 
 
-class AttributeReader {
+class AttributeReader : public std::enable_shared_from_this<AttributeReader> {
 protected:
     explicit AttributeReader(std::string path);
     virtual ~AttributeReader();
 public:
     static std::shared_ptr<AttributeReader> createReader(const std::string& path);
+
+    // Returns a reader usable concurrently with this one, for callers that
+    // want to read disjoint ranges from multiple threads at once. Formats
+    // that read via a single sequential stream/cursor (e.g. LASzip) must
+    // override this to open an independent instance — mirrors
+    // PotreeConverter's per-task laszip_POINTER instances (see
+    // Converter/src/chunker_countsort_laszip.cpp). The default assumes
+    // readPositions()/readRawData() are already safe to call concurrently on
+    // the same instance (true for e.g. a plain in-memory reader) and just
+    // hands back this same instance.
+    virtual std::shared_ptr<AttributeReader> clone() const {
+        return std::const_pointer_cast<AttributeReader>(shared_from_this());
+    }
+
     enum ReaderType {
         LAS,
         PCD

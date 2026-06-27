@@ -35,6 +35,16 @@ public:
     // Concurrent calls for the same relativePath are serialized in call order.
     WriteResult append(const std::string &relativePath, const std::vector<uint8_t> &data);
 
+    // Opens relativePath in append mode, writes data, and closes immediately —
+    // unlike append(), never keeps a long-lived std::ofstream open for it.
+    // Use this when the number of distinct relativePath values can be very
+    // large (e.g. per-batch hierarchy header files): append() holds one open
+    // file handle per path until flushAll(), and closing tens of thousands of
+    // them at once becomes the dominant cost. Concurrent calls for the same
+    // relativePath are still serialized (and ordered), via a lightweight
+    // per-path mutex that doesn't itself hold a file handle open.
+    void appendAndClose(const std::string &relativePath, const std::vector<uint8_t> &data);
+
     // Same as append(), but runs on the thread pool.
     std::future<WriteResult> appendAsync(const std::string &relativePath, std::vector<uint8_t> data);
 
@@ -66,6 +76,11 @@ private:
     PCLiteThreadPool pool_;
     std::mutex registryMutex_;
     std::unordered_map<std::string, std::unique_ptr<FileState>> files_;
+
+    // Per-path mutexes for appendAndClose() — separate from `files_` since
+    // these paths never get a long-lived FileState/ofstream.
+    std::mutex ephemeralRegistryMutex_;
+    std::unordered_map<std::string, std::unique_ptr<std::mutex>> ephemeralMutexes_;
 };
 
 #endif //PCLITE_CONCURRENT_WRITER_H

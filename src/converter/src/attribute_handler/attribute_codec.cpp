@@ -113,6 +113,22 @@ void setComponent(vec3d &v, int i, double value) {
 
 void encodeGeneric(uint8_t *dst, const uint8_t *src,
                    const Attribute &srcAttr, const Attribute &dstAttr) {
+    // Fast path: if src and dst share the same element type/count and the
+    // scale_/offset_ transform is identical on both sides, decoding to world
+    // space and re-quantizing is a no-op (world cancels out exactly for any
+    // integral input) — skip straight to a byte copy. This is the common
+    // case for every LAS attribute except position (intensity,
+    // classification, return number, rgb, ... all carry scale=1/offset=0
+    // unchanged from source to destination).
+    if (srcAttr.type_ == dstAttr.type_ && srcAttr.numElements_ == dstAttr.numElements_ &&
+        srcAttr.scale_.x == dstAttr.scale_.x && srcAttr.scale_.y == dstAttr.scale_.y &&
+        srcAttr.scale_.z == dstAttr.scale_.z &&
+        srcAttr.offset_.x == dstAttr.offset_.x && srcAttr.offset_.y == dstAttr.offset_.y &&
+        srcAttr.offset_.z == dstAttr.offset_.z) {
+        std::memcpy(dst, src, static_cast<size_t>(dstAttr.bytes_));
+        return;
+    }
+
     int srcElemBytes = srcAttr.numElements_ > 0 ? srcAttr.bytes_ / srcAttr.numElements_ : 0;
     int dstElemBytes = dstAttr.numElements_ > 0 ? dstAttr.bytes_ / dstAttr.numElements_ : 0;
 
