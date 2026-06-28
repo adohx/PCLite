@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -118,8 +119,12 @@ struct ConverterViewerFixture : public ::testing::Test {
     std::filesystem::path octreeDir;
 
     void SetUp() override {
+        // Nanosecond clock instead of random_seed() (process-launch-time,
+        // second resolution) avoids temp dir collisions when ctest -jN
+        // launches multiple test processes within the same second.
         tempDir = std::filesystem::temp_directory_path() /
-                  ("pclite_integ_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+                  ("pclite_integ_" +
+                   std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
         std::filesystem::remove_all(tempDir);
         std::filesystem::create_directories(tempDir);
         octreeDir = tempDir / "out";

@@ -2,6 +2,7 @@
 #include "node_loader/point_cloud_loader.h"
 #include "converter.h"
 #include "node.h"
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -24,8 +25,13 @@ struct PointCloudLoaderTest : public ::testing::Test {
     std::unique_ptr<PointCloudLoader> loader;
 
     void SetUp() override {
+        // random_seed() alone (process-launch-time, second resolution) collides
+        // when ctest -jN launches multiple test processes within the same
+        // second, racing on the same temp dir; nanosecond clock makes that
+        // collision practically impossible.
         tempDir = std::filesystem::temp_directory_path() /
-                  ("pclite_pcl_loader_test_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+                  ("pclite_pcl_loader_test_" +
+                   std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
         std::filesystem::remove_all(tempDir);
         std::filesystem::create_directories(tempDir);
         datasetDir = tempDir / "dataset";

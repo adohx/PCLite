@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -137,8 +138,12 @@ std::vector<HierarchyRecord> parseHierarchy(const std::filesystem::path &path) {
 } // namespace
 
 TEST(ConverterTest, ConvertsSyntheticLasAndProducesValidOutputs) {
+    // Nanosecond clock instead of random_seed() (process-launch-time, second
+    // resolution) avoids temp dir collisions when ctest -jN launches multiple
+    // test processes within the same second.
     std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                 ("pclite_converter_test_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+                                 ("pclite_converter_test_" +
+                                  std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
 
@@ -221,7 +226,8 @@ TEST(ConverterTest, ConvertsSyntheticLasAndProducesValidOutputs) {
 
 TEST(ConverterTest, ProgressCallbackReportsAllStagesAndReachesComplete) {
     std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                 ("pclite_converter_progress_test_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+                                 ("pclite_converter_progress_test_" +
+                                  std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
 
