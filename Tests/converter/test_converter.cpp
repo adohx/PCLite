@@ -179,9 +179,13 @@ TEST(ConverterTest, ConvertsSyntheticLasAndProducesValidOutputs) {
     ASSERT_TRUE(std::filesystem::exists(target / "hierarchy.bin"));
     ASSERT_TRUE(std::filesystem::exists(target / "octree.bin"));
 
-    std::ifstream metaIn(target / "metadata.json");
     nlohmann::json meta;
-    metaIn >> meta;
+    {
+        // Closed before the remove_all() at the end of this test -- Windows
+        // refuses to delete a file that's still open (unlike POSIX).
+        std::ifstream metaIn(target / "metadata.json");
+        metaIn >> meta;
+    }
 
     EXPECT_EQ(meta["points"].get<uint64_t>(), kNumPoints);
 
