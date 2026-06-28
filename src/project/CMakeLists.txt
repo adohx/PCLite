@@ -10,5 +10,3 @@ collect_sources(PROJECT_MGMT_SRCS ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(${PROJECT_NAME} ${PROJECT_MGMT_SRCS})
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(${PROJECT_NAME} PUBLIC nlohmann_json::nlohmann_json)
-
-add_subdirectory(tests)

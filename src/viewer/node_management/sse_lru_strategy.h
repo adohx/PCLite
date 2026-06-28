@@ -4,6 +4,7 @@
 #include "manage_strategy.h"
 #include <list>
 #include <unordered_map>
+#include <unordered_set>
 
 // Loading: SSE-based octree traversal.  Starts from each root node and
 // recurses into children only while the node's projected inter-point spacing
@@ -45,6 +46,13 @@ private:
     // LRU: front = most recently used, back = oldest
     std::list<Node*>                                      lruOrder_;
     std::unordered_map<Node*, std::list<Node*>::iterator> lruPos_;
+
+    // Nodes touchNode()'d during the current evaluate() call -- i.e.
+    // actually needed by this frame's traversal. Eviction must never drop
+    // one of these even if the view needs more distinct nodes than
+    // maxLoadedNodes_, or it would just get reloaded from disk next frame
+    // and evicted again: a permanent thrash loop. See evaluate().
+    std::unordered_set<Node*> touchedThisFrame_;
 };
 
 #endif // PCLITE_SSE_LRU_STRATEGY_H

@@ -61,6 +61,8 @@ float SSELruStrategy::computeSSE(const Node& node, double distSq, float screenFa
 // ── LRU ───────────────────────────────────────────────────────────────────────
 
 void SSELruStrategy::touchNode(Node* node) {
+    touchedThisFrame_.insert(node);
+
     auto it = lruPos_.find(node);
     if (it != lruPos_.end()) {
         lruOrder_.erase(it->second);
@@ -122,15 +124,30 @@ std::vector<Node*> SSELruStrategy::evaluate(
 
     // Collect nodes to load while touching already-loaded ones in LRU
     std::vector<Node*> toLoad;
+    touchedThisFrame_.clear();
     for (auto& n : nodes)
         if (n->parent_ == nullptr)
             traverse(n.get(), camPos, planes, screenFactor, toLoad);
 
-    // Evict LRU tail if over budget (they will be culled by NodeManager)
-    while (lruPos_.size() > maxLoadedNodes_) {
-        Node* victim = lruOrder_.back();
-        lruOrder_.pop_back();
-        lruPos_.erase(victim);
+    // Evict LRU tail if over budget (they will be culled by NodeManager) --
+    // but only nodes NOT touched this frame. Once the current view needs
+    // more distinct nodes than maxLoadedNodes_, evicting one of them just
+    // because it was touched earlier in this same frame's traversal order
+    // would make it reload from disk next frame only to be evicted again:
+    // permanent thrash (visible as the displayed point count oscillating
+    // and FPS collapsing under constant disk I/O). Better to temporarily
+    // exceed the budget; it self-corrects once the view needs fewer nodes.
+    size_t overBudget = lruPos_.size() > maxLoadedNodes_ ? lruPos_.size() - maxLoadedNodes_ : 0;
+    if (overBudget > 0) {
+        std::vector<Node*> victims;
+        victims.reserve(overBudget);
+        for (auto rit = lruOrder_.rbegin(); rit != lruOrder_.rend() && victims.size() < overBudget; ++rit)
+            if (!touchedThisFrame_.count(*rit)) victims.push_back(*rit);
+
+        for (Node* victim : victims) {
+            lruOrder_.erase(lruPos_[victim]);
+            lruPos_.erase(victim);
+        }
     }
 
     // Active set = LRU members (recently-seen loaded nodes) + nodes queued for load
