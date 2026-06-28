@@ -28,13 +28,14 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aColor;
 uniform mat4 uMVP;
 uniform int uHighlightIndex; // gl_VertexID to highlight; < 0 disables
+uniform float uPointSize;
 out vec3 vColor;
 flat out int vHighlighted;
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
     vColor = aColor;
     vHighlighted = (gl_VertexID == uHighlightIndex) ? 1 : 0;
-    gl_PointSize = vHighlighted == 1 ? 8.0 : 2.0;
+    gl_PointSize = vHighlighted == 1 ? uPointSize * 4.0 : uPointSize;
 }
 )";
 
@@ -152,4 +153,8 @@ void Shader::setUint(const char* name, unsigned int v) const {
 
 void Shader::setVec4(const char* name, float x, float y, float z, float w) const {
     glUniform4f(glGetUniformLocation(program_, name), x, y, z, w);
+}
+
+void Shader::setFloat(const char* name, float v) const {
+    glUniform1f(glGetUniformLocation(program_, name), v);
 }

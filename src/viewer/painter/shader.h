@@ -20,6 +20,7 @@ public:
     void setInt(const char* name, int v) const;
     void setUint(const char* name, unsigned int v) const;
     void setVec4(const char* name, float x, float y, float z, float w) const;
+    void setFloat(const char* name, float v) const;
 
 private:
     unsigned int program_ = 0;

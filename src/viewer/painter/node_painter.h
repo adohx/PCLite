@@ -25,6 +25,17 @@ public:
     // subsequent paint() calls. Pass node == nullptr to clear.
     void setHighlight(Node* node, int pointIndex) override;
 
+    // GL point size (in pixels) for non-highlighted points; the highlighted
+    // point is always drawn 4x larger (see kPointCloudVertexSrc). Applied on
+    // the next paint() call.
+    void setPointSize(float size) { pointSize_ = size; }
+    float pointSize() const { return pointSize_; }
+
+    // Sum of point counts across every currently resident (added) node --
+    // i.e. how many points are actually being drawn this frame, as opposed
+    // to the full dataset's point count.
+    uint64_t visiblePointCount() const;
+
 private:
     Attributes attributes_;
     Shader shader_;
@@ -44,6 +55,7 @@ private:
 
     Node* highlightNode_ = nullptr;
     int highlightIndex_ = -1;
+    float pointSize_ = 2.f;
 
     Batch createBatch(const Node* node) const;
     static void destroyBatch(Batch& batch);

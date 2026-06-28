@@ -77,6 +77,10 @@ void MainWindow::setPropertiesCallback(std::function<void()> callback) {
     propertiesCallback_ = std::move(callback);
 }
 
+void MainWindow::setToolbarCallback(std::function<void()> callback) {
+    toolbarCallback_ = std::move(callback);
+}
+
 void MainWindow::setHubContentCallback(std::function<void()> callback) {
     hubContentCallback_ = std::move(callback);
 }
@@ -92,7 +96,11 @@ void MainWindow::buildDefaultDockLayout(unsigned int dockspaceId) {
     ImGuiID center = dockspaceId;
     ImGuiID top, bottom, right;
     ImGui::DockBuilderSplitNode(center, ImGuiDir_Down,  0.08f, &bottom, &center);
-    ImGui::DockBuilderSplitNode(center, ImGuiDir_Up,    0.07f, &top,    &center);
+    // Tall enough to fit a row of buttons at the 2x UI scale (ScaleAllSizes
+    // in the constructor) -- 0.07 was sized for a single plain text label
+    // and clips anything taller once real controls (the measurement mode
+    // buttons) were added.
+    ImGui::DockBuilderSplitNode(center, ImGuiDir_Up,    0.12f, &top,    &center);
     ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.22f, &right,  &center);
 
     ImGui::DockBuilderDockWindow("Toolbar",    top);
@@ -171,6 +179,12 @@ void MainWindow::drawUI() {
 
     ImGui::Begin("Toolbar");
     ImGui::TextUnformatted("PCLite");
+    if (toolbarCallback_) {
+        ImGui::SameLine();
+        ImGui::TextUnformatted("|");
+        ImGui::SameLine();
+        toolbarCallback_();
+    }
     ImGui::End();
 
     ImGui::Begin("Status");
@@ -198,6 +212,16 @@ void MainWindow::drawUI() {
     ImGui::Image((ImTextureID)(intptr_t)viewport_->textureId(),
                  ImVec2((float)vw, (float)vh), ImVec2(0, 1), ImVec2(1, 0));
     viewportHovered_ = ImGui::IsItemHovered();
+
+    // Measurement value labels: plain 2D screen-space text drawn over the
+    // rendered image, so they always face the screen by construction (no
+    // 3D billboard geometry needed) -- ImGui's draw list/font isn't usable
+    // from inside Viewport's own GL render pass, so this has to happen here.
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    for (auto& label : viewport_->measurementScreenLabels())
+        drawList->AddText(ImVec2(origin.x + label.x, origin.y + label.y),
+                           IM_COL32(255, 255, 0, 255), label.text.c_str());
+
     ImGui::End();
 }
 

@@ -3,11 +3,13 @@
 
 #include "window.h"
 #include "camera/camera_controller.h"
+#include "measurement/measurement_manager.h"
 #include "pclite_thread_pool.h"
 #include "vec3.h"
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <string>
 
 struct Node;
 class Layer;
@@ -28,8 +30,26 @@ public:
         Node* node = nullptr;
         int pointIndex = -1;
         vec3f position{};
+        // Locally-fitted-plane info computed for this same pick (the same
+        // KD-tree fit behind the cyan ring decal); hasPlane false if the fit
+        // failed (e.g. too few neighbors resident). Consumed by
+        // MeasurementManager for DistanceMeasurement's reference plane.
+        bool hasPlane = false;
+        vec3f planeCenter{};
+        vec3f planeNormal{};
     };
     const PickResult& lastPick() const { return lastPick_; }
+
+    // Forwards clicks (when hit) to the measurement manager; owned here
+    // since Viewport is what resolves clicks to 3D positions via picking.
+    MeasurementManager& measurementManager() { return measurementManager_; }
+    const MeasurementManager& measurementManager() const { return measurementManager_; }
+
+    // Current measurement's labels, already projected to viewport-local
+    // pixel coordinates (origin at this panel's top-left) -- plain
+    // data, no ImGui dependency here; MainWindow draws the actual text.
+    struct ScreenLabel { float x = 0.f, y = 0.f; std::string text; };
+    std::vector<ScreenLabel> measurementScreenLabels() const;
 
     // Concrete loader used to fetch full-resolution leaf data for pick-assist
     // plane-fit refinement (see queryFinestLeafAt). Not the generic
@@ -96,6 +116,7 @@ private:
     bool  hoverPending_ = false;
 
     PickResult lastPick_;
+    MeasurementManager measurementManager_;
 
     // Pick-assist plane fit (the ring indicator): computed in two passes.
     // resolvePick() does an immediate fit from whatever's currently

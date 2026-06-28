@@ -22,6 +22,9 @@ public:
     const Attributes&  attributes() const { return attributes_; }
     BoundingBoxd boundingBox() const { return header_.bbox_; }
     const std::string& dir()        const { return dir_; }
+    // Total point count of the full dataset (from metadata.json), regardless
+    // of how much is currently loaded/rendered at the active LOD.
+    uint64_t totalPoints() const { return header_.points_; }
 
     bool load(std::shared_ptr<Node> node)                override;
     std::shared_ptr<Node> loadRoot()                     override;

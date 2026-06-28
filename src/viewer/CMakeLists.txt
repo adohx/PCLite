@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 include(${CMAKE_SOURCE_DIR}/cmake/utils.cmake)
 
 # Collect each source subdirectory individually so tests/ is excluded from the library.
-foreach(subdir camera layer node_loader node_management painter window)
+foreach(subdir camera layer measurement node_loader node_management painter window)
     collect_sources(_subdir_srcs ${CMAKE_CURRENT_SOURCE_DIR}/${subdir} RECURSE)
     list(APPEND VIEWER_SRCS ${_subdir_srcs})
 endforeach()

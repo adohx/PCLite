@@ -93,11 +93,18 @@ void NodePainter::setHighlight(Node* node, int pointIndex) {
     highlightIndex_ = node ? pointIndex : -1;
 }
 
+uint64_t NodePainter::visiblePointCount() const {
+    uint64_t total = 0;
+    for (auto& [node, batch] : batches_) total += (uint64_t)batch.count;
+    return total;
+}
+
 void NodePainter::paint(const Mat4f& viewMatrix, const Mat4f& projMatrix) {
     glEnable(GL_PROGRAM_POINT_SIZE); // lets the vertex shader drive gl_PointSize for the highlighted point
 
     shader_.use();
     shader_.setMat4("uMVP", projMatrix * viewMatrix);
+    shader_.setFloat("uPointSize", pointSize_);
 
     for (auto& [node, batch] : batches_) {
         if (batch.count == 0) continue;

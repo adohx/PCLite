@@ -1,7 +1,6 @@
 #include "application.h"
 
 #include "imgui.h"
-#include <glad/gl.h>
 
 #include <algorithm>
 
@@ -9,12 +8,14 @@
 #include "camera/perspective_camera.h"
 #include "camera/arcball_controller.h"
 #include "layer/point_cloud_layer.h"
+#include "measurement/measurement_manager.h"
 #include "node_management/sse_lru_strategy.h"
 #include "painter/node_painter.h"
 #include "painter/bounding_box_painter.h"
 #include "painter/axis_painter.h"
 #include "painter/rotation_center_painter.h"
 #include "painter/plane_fit_ring_painter.h"
+#include "painter/measurement_painter.h"
 
 Application::Application()
     : mainWindow_(1280, 800, "PCLite"),
@@ -29,15 +30,52 @@ Application::Application()
 
     mainWindow_.setHubContentCallback([this] { hubPanel_.draw(); });
     mainWindow_.setFileMenuCallback([this] { drawFileMenu(); });
-    mainWindow_.setPropertiesCallback([this] {
-        if (ImGui::SliderFloat("Point size", &pointSize_, 1.f, 10.f)) glPointSize(pointSize_);
-    });
+    mainWindow_.setPropertiesCallback([this] { drawProperties(); });
+    mainWindow_.setToolbarCallback([this] { drawToolbar(); });
     mainWindow_.setMode(MainWindow::Mode::Hub);
 }
 
 void Application::drawFileMenu() {
     bool projectOpen = mainWindow_.mode() == MainWindow::Mode::Project;
     if (ImGui::MenuItem("Close Project", nullptr, false, projectOpen)) closeProject();
+}
+
+void Application::drawProperties() {
+    if (ImGui::SliderFloat("Point size", &pointSize_, 1.f, 10.f))
+        if (currentNodePainter_) currentNodePainter_->setPointSize(pointSize_);
+
+    if (currentLoader_) {
+        ImGui::Separator();
+        ImGui::Text("Total points: %llu", (unsigned long long)currentLoader_->totalPoints());
+        if (currentNodePainter_)
+            ImGui::Text("Displayed points: %llu",
+                        (unsigned long long)currentNodePainter_->visiblePointCount());
+    }
+}
+
+void Application::drawToolbar() {
+    if (mainWindow_.mode() != MainWindow::Mode::Project) return;
+
+    auto& mm = mainWindow_.viewport().measurementManager();
+
+    // Mode-select buttons; no icon font is loaded yet, so these are plain
+    // text labels for now -- swap for icon glyphs if/when one is added.
+    auto modeButton = [&](const char* label, MeasurementMode mode) {
+        bool active = mm.mode() == mode;
+        if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ImGui::Button(label)) mm.setMode(mode);
+        if (active) ImGui::PopStyleColor();
+        ImGui::SameLine();
+    };
+
+    ImGui::TextUnformatted("Measure:");
+    ImGui::SameLine();
+    modeButton("None", MeasurementMode::None);
+    modeButton("Distance", MeasurementMode::Distance);
+    modeButton("Angle", MeasurementMode::Angle);
+
+    if (mm.mode() != MeasurementMode::None && ImGui::Button("Clear"))
+        mm.clear();
 }
 
 void Application::openProject(const ProjectInfo& info) {
@@ -58,11 +96,17 @@ void Application::openProject(const ProjectInfo& info) {
     auto& mgr = layer->nodeManager();
     mgr.addTree(root);
     mgr.addStrategy(std::move(strategy));
-    mgr.addPainter(std::make_unique<NodePainter>(currentLoader_->attributes()));
+
+    auto nodePainter = std::make_unique<NodePainter>(currentLoader_->attributes());
+    nodePainter->setPointSize(pointSize_);
+    currentNodePainter_ = nodePainter.get();
+    mgr.addPainter(std::move(nodePainter));
+
     mgr.addPainter(std::make_unique<BoundingBoxPainter>());
     mgr.addPainter(std::make_unique<AxisPainter>());
     mgr.addPainter(std::make_unique<RotationCenterPainter>());
     mgr.addPainter(std::make_unique<PlaneFitRingPainter>());
+    mgr.addPainter(std::make_unique<MeasurementPainter>(&mainWindow_.viewport().measurementManager()));
 
     vec3d center = {(bbMin.x + bbMax.x) * 0.5, (bbMin.y + bbMax.y) * 0.5, (bbMin.z + bbMax.z) * 0.5};
 
@@ -86,6 +130,7 @@ void Application::openProject(const ProjectInfo& info) {
 void Application::closeProject() {
     mainWindow_.viewport().reset(); // tears down everything that references currentLoader_ first
     currentLoader_.reset();
+    currentNodePainter_ = nullptr;
     mainWindow_.setMode(MainWindow::Mode::Hub);
 }
 

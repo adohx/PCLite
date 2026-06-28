@@ -30,6 +30,11 @@ public:
     // Content drawn once per frame inside the docked "Properties" panel.
     void setPropertiesCallback(std::function<void()> callback);
 
+    // Content drawn once per frame inside the docked "Toolbar" panel, after
+    // the built-in "PCLite" label. For mode/tool-selection controls (e.g.
+    // measurement mode) as opposed to Properties' passive stats/parameters.
+    void setToolbarCallback(std::function<void()> callback);
+
     // Content drawn once per frame as the entire UI when mode() == Hub.
     void setHubContentCallback(std::function<void()> callback);
 
@@ -53,6 +58,7 @@ private:
 
     std::unique_ptr<Viewport> viewport_;
     std::function<void()> propertiesCallback_;
+    std::function<void()> toolbarCallback_;
     std::function<void()> hubContentCallback_;
     std::function<void()> fileMenuCallback_;
 

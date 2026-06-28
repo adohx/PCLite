@@ -69,6 +69,7 @@ void Viewport::reset() {
     controller_.reset();
 
     lastPick_ = PickResult{};
+    measurementManager_.setMode(MeasurementMode::None);
     pickAssistLoader_ = nullptr;
     currentHitLayer_ = nullptr;
     currentSearchRadius_ = 0.f;
@@ -95,8 +96,12 @@ void Viewport::update(float dt) {
     // pick (whether from a hover or a click) has stood for kHoverRefineDelay
     // without being superseded. A click already launches its own refinement
     // immediately in pick(), which sets refinementLaunchedForCurrentPick_ so
-    // this just no-ops for it.
-    if (lastPick_.hit && currentHitLayer_ && pickAssistLoader_ && !refinementLaunchedForCurrentPick_) {
+    // this just no-ops for it. The whole plane-fit decal (ring + the
+    // KD-tree work behind it, both the immediate fit in resolvePick() and
+    // this refinement) is pick-assist for measuring -- only relevant, so
+    // only computed, while a measurement mode is active.
+    if (lastPick_.hit && currentHitLayer_ && pickAssistLoader_ && !refinementLaunchedForCurrentPick_ &&
+        measurementManager_.mode() != MeasurementMode::None) {
         hoverSettleTimer_ += dt;
         if (hoverSettleTimer_ >= kHoverRefineDelay) {
             launchRefinement(currentHitLayer_, lastPick_.position, currentSearchRadius_, pickGeneration_);
@@ -116,7 +121,7 @@ void Viewport::applyPendingRefinement() {
     PendingRefinement result = pendingRefinement_.get();
     if (result.generation != pickGeneration_) return; // a newer pick() superseded this one
 
-    if (result.valid && result.layer)
+    if (result.valid && result.layer && measurementManager_.mode() != MeasurementMode::None)
         result.layer->nodeManager().setPlaneFit(true, result.center, result.normal, result.radius);
 }
 
@@ -329,7 +334,10 @@ Layer* Viewport::resolvePick(float x, float y, float& outRadius) {
     vec3f planeCenter{}, planeNormal{};
     float searchRadius = 0.f;
 
-    if (lastPick_.hit && newHitLayer) {
+    // The plane fit (ring decal + the KD-tree radius-search work behind it)
+    // is pick-assist for measuring -- skip it entirely outside measurement
+    // mode so ordinary navigation/picking doesn't pay for it or show it.
+    if (lastPick_.hit && newHitLayer && measurementManager_.mode() != MeasurementMode::None) {
         searchRadius = std::max(static_cast<float>(lastPick_.node->spacing_ * 4.0), 1e-3f);
         auto candidates = newHitLayer->nodeManager().nodesNear(
             vec3d{static_cast<double>(lastPick_.position.x),
@@ -343,6 +351,10 @@ Layer* Viewport::resolvePick(float x, float y, float& outRadius) {
         bool isHitLayer = (layer.get() == newHitLayer);
         layer->nodeManager().setPlaneFit(isHitLayer && planeOk, planeCenter, planeNormal, searchRadius);
     }
+
+    lastPick_.hasPlane    = planeOk;
+    lastPick_.planeCenter = planeCenter;
+    lastPick_.planeNormal = planeNormal;
 
     currentHitLayer_     = newHitLayer;
     currentSearchRadius_ = searchRadius;
@@ -389,15 +401,42 @@ void Viewport::pick(float x, float y) {
     float radius = 0.f;
     Layer* hitLayer = resolvePick(x, y, radius);
 
-    if (lastPick_.hit && hitLayer && !refinementLaunchedForCurrentPick_) {
+    if (lastPick_.hit && hitLayer && !refinementLaunchedForCurrentPick_ &&
+        measurementManager_.mode() != MeasurementMode::None) {
         launchRefinement(hitLayer, lastPick_.position, radius, pickGeneration_);
         refinementLaunchedForCurrentPick_ = true;
     }
+
+    if (lastPick_.hit)
+        measurementManager_.onPointPicked(lastPick_.position, lastPick_.hasPlane,
+                                          lastPick_.planeCenter, lastPick_.planeNormal);
 }
 
 void Viewport::previewAt(float x, float y) {
     float radius = 0.f;
     resolvePick(x, y, radius);
+}
+
+std::vector<Viewport::ScreenLabel> Viewport::measurementScreenLabels() const {
+    std::vector<ScreenLabel> out;
+    if (cameras_.empty()) return out;
+
+    Mat4f vp = cameras_[0]->projectionMatrix() * cameras_[0]->viewMatrix();
+    for (auto& label : measurementManager_.currentLabels()) {
+        float x = label.anchor.x, y = label.anchor.y, z = label.anchor.z;
+        float clipX = vp(0, 0) * x + vp(0, 1) * y + vp(0, 2) * z + vp(0, 3);
+        float clipY = vp(1, 0) * x + vp(1, 1) * y + vp(1, 2) * z + vp(1, 3);
+        float clipW = vp(3, 0) * x + vp(3, 1) * y + vp(3, 2) * z + vp(3, 3);
+        if (clipW <= 1e-6f) continue; // behind the camera
+
+        float ndcX = clipX / clipW, ndcY = clipY / clipW;
+        ScreenLabel screenLabel;
+        screenLabel.x = (ndcX * 0.5f + 0.5f) * (float)width_;
+        screenLabel.y = (1.f - (ndcY * 0.5f + 0.5f)) * (float)height_; // NDC is bottom-up, pixels top-down
+        screenLabel.text = label.text;
+        out.push_back(std::move(screenLabel));
+    }
+    return out;
 }
 
 void Viewport::render() {

@@ -7,6 +7,8 @@
 
 #include <memory>
 
+class NodePainter;
+
 // Top-level orchestrator: owns the persistent MainWindow/GL context and the
 // ProjectManager, and switches MainWindow between Hub mode (no project open
 // -- ProjectHubPanel drives create/open/delete/recent) and Project mode
@@ -20,6 +22,8 @@ private:
     void openProject(const ProjectInfo& info);
     void closeProject();
     void drawFileMenu();
+    void drawProperties();
+    void drawToolbar();
 
     ProjectManager projectManager_;
     MainWindow mainWindow_;
@@ -29,6 +33,10 @@ private:
     // mode. Destroyed (in closeProject()) only after Viewport::reset() has
     // already torn down everything that references it.
     std::unique_ptr<PointCloudLoader> currentLoader_;
+
+    // Non-owning; lives in the layer's NodeManager (owned via Viewport).
+    // Null in Hub mode.
+    NodePainter* currentNodePainter_ = nullptr;
 
     float pointSize_ = 2.f;
 };
