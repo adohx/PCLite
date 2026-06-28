@@ -69,5 +69,14 @@ vcpkg_installed/
 Testing/
 .cache/
 
-/test_data/
+# Excluding the directory's *contents* (not the directory itself) so the
+# negation below actually works -- git never re-includes files inside a
+# directory excluded via a trailing-slash pattern like `/test_data/`.
+/test_data/*
+# ...except the one small, fully deterministic LAS fixture CI/fresh clones
+# need (see tools/generate_sample_las.py); tests convert it into a temp
+# dataset themselves rather than relying on a committed, format-fragile
+# snapshot of converter output. Everything else under test_data/
+# (office.las and friends) is large, local-only dev data.
+!/test_data/sample.las
 /.vs

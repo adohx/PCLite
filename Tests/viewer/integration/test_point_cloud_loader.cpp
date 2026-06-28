@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "node_loader/point_cloud_loader.h"
+#include "converter.h"
 #include "node.h"
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -8,98 +10,43 @@
 #define TEST_DATA_DIR "./test_data"
 #endif
 
-static const std::string kDataDir = TEST_DATA_DIR;
+namespace {
 
-// ── Construction ──────────────────────────────────────────────────────────────
+// Converts the small, fully deterministic test_data/sample.las (see
+// tools/generate_sample_las.py) into a fresh temp dataset for each test,
+// the same way ConverterViewerFixture (test_converter_viewer_integration.cpp)
+// already does with its own synthetic LAS -- so this only needs the one
+// small committed .las fixture, never a frozen snapshot of converter
+// output that could silently go stale if the PCLite format changes.
+struct PointCloudLoaderTest : public ::testing::Test {
+    std::filesystem::path tempDir;
+    std::filesystem::path datasetDir;
+    std::unique_ptr<PointCloudLoader> loader;
 
-TEST(PointCloudLoaderTest, ConstructFromValidDirectory) {
-    ASSERT_NO_THROW(PointCloudLoader loader(kDataDir));
-}
+    void SetUp() override {
+        tempDir = std::filesystem::temp_directory_path() /
+                  ("pclite_pcl_loader_test_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+        std::filesystem::remove_all(tempDir);
+        std::filesystem::create_directories(tempDir);
+        datasetDir = tempDir / "dataset";
 
-TEST(PointCloudLoaderTest, ConstructFromInvalidDirectoryThrows) {
-    EXPECT_THROW(PointCloudLoader("/nonexistent/path"), std::runtime_error);
-}
+        Converter::Options opts;
+        opts.maxPointsPerChunk = 500;
+        opts.firstChunkSize = 100;
+        std::string lasPath = std::string(TEST_DATA_DIR) + "/sample.las";
+        Converter converter({lasPath}, datasetDir.string(), opts);
+        ASSERT_TRUE(converter.run()) << "Converter::run() failed";
 
-// ── Metadata ──────────────────────────────────────────────────────────────────
+        loader = std::make_unique<PointCloudLoader>(datasetDir.string());
+    }
 
-TEST(PointCloudLoaderTest, BoundingBoxIsValid) {
-    PointCloudLoader loader(kDataDir);
-    EXPECT_TRUE(loader.boundingBox().isValid());
-}
-
-TEST(PointCloudLoaderTest, BoundingBoxMinLessThanMax) {
-    PointCloudLoader loader(kDataDir);
-    auto bb = loader.boundingBox();
-    EXPECT_LT(bb.min().x, bb.max().x);
-    EXPECT_LT(bb.min().y, bb.max().y);
-    EXPECT_LT(bb.min().z, bb.max().z);
-}
-
-TEST(PointCloudLoaderTest, AttributesContainPosition) {
-    PointCloudLoader loader(kDataDir);
-    // getAttribute is non-const; copy to allow the call
-    auto attrs = loader.attributes();
-    EXPECT_FALSE(attrs.getAttribute("position").name_.empty());
-}
-
-// ── loadRoot ──────────────────────────────────────────────────────────────────
-
-TEST(PointCloudLoaderTest, LoadRootReturnsNonNull) {
-    PointCloudLoader loader(kDataDir);
-    EXPECT_NE(loader.loadRoot(), nullptr);
-}
-
-TEST(PointCloudLoaderTest, LoadRootHasCorrectName) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
-    ASSERT_NE(root, nullptr);
-    EXPECT_EQ(root->name_, "r");
-}
-
-TEST(PointCloudLoaderTest, LoadRootIsAtLevelZero) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
-    ASSERT_NE(root, nullptr);
-    EXPECT_EQ(root->level_, 0);
-}
-
-TEST(PointCloudLoaderTest, LoadRootNotInLoadingState) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
-    ASSERT_NE(root, nullptr);
-    EXPECT_FALSE(root->isLoading());
-}
-
-TEST(PointCloudLoaderTest, LoadRootBoundingBoxMatchesMetadata) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
-    ASSERT_NE(root, nullptr);
-    auto rootBB = root->bb_;
-    auto metaBB = loader.boundingBox();
-    EXPECT_DOUBLE_EQ(rootBB.min().x, metaBB.min().x);
-    EXPECT_DOUBLE_EQ(rootBB.min().y, metaBB.min().y);
-    EXPECT_DOUBLE_EQ(rootBB.min().z, metaBB.min().z);
-    EXPECT_DOUBLE_EQ(rootBB.max().x, metaBB.max().x);
-    EXPECT_DOUBLE_EQ(rootBB.max().y, metaBB.max().y);
-    EXPECT_DOUBLE_EQ(rootBB.max().z, metaBB.max().z);
-}
-
-// ── Tree structure ────────────────────────────────────────────────────────────
-
-TEST(PointCloudLoaderTest, LoadRootProducesChildNodes) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
-    ASSERT_NE(root, nullptr);
-
-    bool hasChild = false;
-    for (const auto& c : root->children_)
-        if (c) { hasChild = true; break; }
-
-    EXPECT_TRUE(hasChild) << "root node should have at least one child after loading hierarchy";
-}
+    void TearDown() override {
+        std::filesystem::remove_all(tempDir);
+    }
+};
 
 // Find first non-proxy leaf in a BFS from root (max depth 3 to keep it fast).
-static std::shared_ptr<Node> findLoadableNode(const std::shared_ptr<Node>& root, int maxDepth = 3) {
+std::shared_ptr<Node> findLoadableNode(const std::shared_ptr<Node>& root, int maxDepth = 3) {
     if (!root) return nullptr;
     if (root->type_ != NodeType::Proxy && root->numPoints_ > 0)
         return root;
@@ -112,59 +59,136 @@ static std::shared_ptr<Node> findLoadableNode(const std::shared_ptr<Node>& root,
     return nullptr;
 }
 
+} // namespace
+
+// ── Construction ──────────────────────────────────────────────────────────────
+
+TEST_F(PointCloudLoaderTest, ConstructFromValidDirectory) {
+    ASSERT_NO_THROW(PointCloudLoader other(datasetDir.string()));
+}
+
+TEST_F(PointCloudLoaderTest, ConstructFromInvalidDirectoryThrows) {
+    EXPECT_THROW(PointCloudLoader("/nonexistent/path"), std::runtime_error);
+}
+
+// ── Metadata ──────────────────────────────────────────────────────────────────
+
+TEST_F(PointCloudLoaderTest, BoundingBoxIsValid) {
+    EXPECT_TRUE(loader->boundingBox().isValid());
+}
+
+TEST_F(PointCloudLoaderTest, BoundingBoxMinLessThanMax) {
+    auto bb = loader->boundingBox();
+    EXPECT_LT(bb.min().x, bb.max().x);
+    EXPECT_LT(bb.min().y, bb.max().y);
+    EXPECT_LT(bb.min().z, bb.max().z);
+}
+
+TEST_F(PointCloudLoaderTest, AttributesContainPosition) {
+    // getAttribute is non-const; copy to allow the call
+    auto attrs = loader->attributes();
+    EXPECT_FALSE(attrs.getAttribute("position").name_.empty());
+}
+
+// ── loadRoot ──────────────────────────────────────────────────────────────────
+
+TEST_F(PointCloudLoaderTest, LoadRootReturnsNonNull) {
+    EXPECT_NE(loader->loadRoot(), nullptr);
+}
+
+TEST_F(PointCloudLoaderTest, LoadRootHasCorrectName) {
+    auto root = loader->loadRoot();
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->name_, "r");
+}
+
+TEST_F(PointCloudLoaderTest, LoadRootIsAtLevelZero) {
+    auto root = loader->loadRoot();
+    ASSERT_NE(root, nullptr);
+    EXPECT_EQ(root->level_, 0);
+}
+
+TEST_F(PointCloudLoaderTest, LoadRootNotInLoadingState) {
+    auto root = loader->loadRoot();
+    ASSERT_NE(root, nullptr);
+    EXPECT_FALSE(root->isLoading());
+}
+
+TEST_F(PointCloudLoaderTest, LoadRootBoundingBoxMatchesMetadata) {
+    auto root = loader->loadRoot();
+    ASSERT_NE(root, nullptr);
+    auto rootBB = root->bb_;
+    auto metaBB = loader->boundingBox();
+    EXPECT_DOUBLE_EQ(rootBB.min().x, metaBB.min().x);
+    EXPECT_DOUBLE_EQ(rootBB.min().y, metaBB.min().y);
+    EXPECT_DOUBLE_EQ(rootBB.min().z, metaBB.min().z);
+    EXPECT_DOUBLE_EQ(rootBB.max().x, metaBB.max().x);
+    EXPECT_DOUBLE_EQ(rootBB.max().y, metaBB.max().y);
+    EXPECT_DOUBLE_EQ(rootBB.max().z, metaBB.max().z);
+}
+
+// ── Tree structure ────────────────────────────────────────────────────────────
+
+TEST_F(PointCloudLoaderTest, LoadRootProducesChildNodes) {
+    auto root = loader->loadRoot();
+    ASSERT_NE(root, nullptr);
+
+    bool hasChild = false;
+    for (const auto& c : root->children_)
+        if (c) { hasChild = true; break; }
+
+    EXPECT_TRUE(hasChild) << "root node should have at least one child after loading hierarchy";
+}
+
 // ── load() ────────────────────────────────────────────────────────────────────
 
-TEST(PointCloudLoaderTest, LoadNonProxyNodeSetsLoadedFlag) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
+TEST_F(PointCloudLoaderTest, LoadNonProxyNodeSetsLoadedFlag) {
+    auto root = loader->loadRoot();
     ASSERT_NE(root, nullptr);
 
     auto target = findLoadableNode(root);
     if (!target) GTEST_SKIP() << "no non-proxy node with points found in first 3 levels";
 
-    bool ok = loader.load(target);
+    bool ok = loader->load(target);
     EXPECT_TRUE(ok);
     EXPECT_TRUE(target->isLoaded());
 }
 
-TEST(PointCloudLoaderTest, LoadedNodeHasPoints) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
+TEST_F(PointCloudLoaderTest, LoadedNodeHasPoints) {
+    auto root = loader->loadRoot();
     ASSERT_NE(root, nullptr);
 
     auto target = findLoadableNode(root);
     if (!target) GTEST_SKIP() << "no non-proxy node with points found in first 3 levels";
 
-    loader.load(target);
+    loader->load(target);
     EXPECT_FALSE(target->getPoints().empty());
 }
 
-TEST(PointCloudLoaderTest, LoadAlreadyLoadedNodeIsIdempotent) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
+TEST_F(PointCloudLoaderTest, LoadAlreadyLoadedNodeIsIdempotent) {
+    auto root = loader->loadRoot();
     ASSERT_NE(root, nullptr);
 
     auto target = findLoadableNode(root);
     if (!target) GTEST_SKIP() << "no non-proxy node with points found in first 3 levels";
 
-    loader.load(target);
+    loader->load(target);
     ASSERT_TRUE(target->isLoaded());
 
     // Second call should return immediately without side effects
-    bool ok = loader.load(target);
+    bool ok = loader->load(target);
     EXPECT_TRUE(ok);
     EXPECT_TRUE(target->isLoaded());
 }
 
-TEST(PointCloudLoaderTest, PointCountMatchesNodeNumPoints) {
-    PointCloudLoader loader(kDataDir);
-    auto root = loader.loadRoot();
+TEST_F(PointCloudLoaderTest, PointCountMatchesNodeNumPoints) {
+    auto root = loader->loadRoot();
     ASSERT_NE(root, nullptr);
 
     auto target = findLoadableNode(root);
     if (!target) GTEST_SKIP() << "no non-proxy node with points found in first 3 levels";
 
-    loader.load(target);
+    loader->load(target);
     auto points = target->getPoints();
     EXPECT_EQ(points.size(), static_cast<size_t>(target->numPoints_));
 }

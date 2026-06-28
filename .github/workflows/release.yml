@@ -1,0 +1,126 @@
+name: Build & Package
+
+# Always builds + tests on every push/PR; only publishes a GitHub Release
+# when a `v*` tag is pushed. Can also be triggered manually at any time to
+# just produce downloadable build artifacts without tagging a release.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Keep this in sync with vcpkg.json's "builtin-baseline" so CI resolves
+  # the exact same dependency versions as a local build.
+  VCPKG_COMMIT: d59510da59a2ee8b943509998b63da7b472d93cf
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            preset: x64-Release
+            artifact_name: PCLite-windows-x64
+          # Built on the oldest supported Ubuntu rather than ubuntu-latest:
+          # a binary built against 22.04's glibc runs fine on newer Ubuntu
+          # too, but not the other way around.
+          - os: ubuntu-22.04
+            preset: linux-Release
+            artifact_name: PCLite-ubuntu22.04-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            autoconf autoconf-archive automake libtool \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev libxxf86vm-dev \
+            libwayland-dev libxkbcommon-dev libegl1-mesa-dev \
+            libdbus-1-dev libudev-dev libibus-1.0-dev libasound2-dev libpulse-dev
+
+      - name: Enable MSVC toolchain
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+
+      # run-vcpkg points VCPKG_BINARY_SOURCES at vcpkg's now-removed 'x-gha'
+      # backend (verified locally: current vcpkg just warns and ignores it,
+      # which combined with the 'clear' prefix means NO caching at all, not
+      # even the default local cache). Override with a plain directory that
+      # we cache ourselves -- simple, and not dependent on vcpkg-tool-version-
+      # specific backend support.
+      - name: Point vcpkg at a cacheable local binary cache dir
+        shell: bash
+        run: echo "VCPKG_BINARY_SOURCES=clear;files,${{ runner.temp }}/vcpkg-bincache,readwrite" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-bincache
+          key: vcpkg-bincache-${{ matrix.os }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --test-dir out/build/${{ matrix.preset }} --output-on-failure -j2
+
+      - name: Stage release package
+        run: cmake --install out/build/${{ matrix.preset }} --prefix ${{ github.workspace }}/stage
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path stage/* -DestinationPath ${{ matrix.artifact_name }}.zip
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tar czf ${{ matrix.artifact_name }}.tar.gz -C stage .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}.zip
+            ${{ matrix.artifact_name }}.tar.gz
+          if-no-files-found: ignore
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*/*
+          generate_release_notes: true

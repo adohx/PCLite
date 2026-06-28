@@ -8,29 +8,34 @@
 #include "attribute_reader/las_reader.h"
 
 namespace {
-std::string officeLasPath() {
-    return std::string(TEST_DATA_DIR) + "/office.las";
+// Small (1000-point), fully deterministic fixture committed to git -- see
+// tools/generate_sample_las.py. A 10x10x10 grid at integer coordinates
+// 0..9 per axis, so bounding box/point count are exact, not approximate.
+std::string sampleLasPath() {
+    return std::string(TEST_DATA_DIR) + "/sample.las";
 }
 }
 
-TEST(LasReader, HeaderInfoMatchesOfficeLas) {
-    auto reader = std::make_shared<LasReader>(officeLasPath());
+TEST(LasReader, HeaderInfoMatchesSampleLas) {
+    auto reader = std::make_shared<LasReader>(sampleLasPath());
 
     EXPECT_EQ(reader->getType(), AttributeReader::LAS);
 
     auto info = reader->headerInfo();
-    EXPECT_EQ(info.extendedNumPoints_, 49092975u);
+    // sample.las is plain LAS 1.2 (no LAS 1.4 extended point count VLR), so
+    // the point count lives in the legacy field; extendedNumPoints_ stays 0.
+    EXPECT_EQ(info.numPoints_, 1000u);
 
-    EXPECT_NEAR(info.min_.x, -16.827, 1e-6);
-    EXPECT_NEAR(info.min_.y, -25.671, 1e-6);
-    EXPECT_NEAR(info.min_.z, -1.457, 1e-6);
-    EXPECT_NEAR(info.max_.x, 21.557, 1e-6);
-    EXPECT_NEAR(info.max_.y, 43.637, 1e-6);
-    EXPECT_NEAR(info.max_.z, 4.597, 1e-6);
+    EXPECT_NEAR(info.min_.x, 0.0, 1e-6);
+    EXPECT_NEAR(info.min_.y, 0.0, 1e-6);
+    EXPECT_NEAR(info.min_.z, 0.0, 1e-6);
+    EXPECT_NEAR(info.max_.x, 9.0, 1e-6);
+    EXPECT_NEAR(info.max_.y, 9.0, 1e-6);
+    EXPECT_NEAR(info.max_.z, 9.0, 1e-6);
 }
 
 TEST(LasReader, AttributesMatchPointFormat2Layout) {
-    auto reader = std::make_shared<LasReader>(officeLasPath());
+    auto reader = std::make_shared<LasReader>(sampleLasPath());
     auto &attrs = reader->getAttributes();
 
     EXPECT_EQ(attrs.getTotalBytes(), 27u);
@@ -41,8 +46,8 @@ TEST(LasReader, AttributesMatchPointFormat2Layout) {
     EXPECT_EQ(position.type_, AttributeType::INT32);
     EXPECT_NEAR(position.scale_.x, 0.001, 1e-9);
     EXPECT_NEAR(position.offset_.x, 0.0, 1e-9);
-    EXPECT_NEAR(position.min_.x, -16.827, 1e-6);
-    EXPECT_NEAR(position.max_.x, 21.557, 1e-6);
+    EXPECT_NEAR(position.min_.x, 0.0, 1e-6);
+    EXPECT_NEAR(position.max_.x, 9.0, 1e-6);
 
     auto rgb = attrs.getAttribute("rgb");
     EXPECT_EQ(rgb.numElements_, 3);
@@ -58,7 +63,7 @@ TEST(LasReader, AttributesMatchPointFormat2Layout) {
 }
 
 TEST(LasReader, ReadPositionWithinBoundingBox) {
-    auto reader = std::make_shared<LasReader>(officeLasPath());
+    auto reader = std::make_shared<LasReader>(sampleLasPath());
     auto info = reader->headerInfo();
 
     auto p0 = reader->readPosition(0);
@@ -77,7 +82,7 @@ TEST(LasReader, ReadPositionWithinBoundingBox) {
 }
 
 TEST(LasReader, ReadRawDataDecodesToSamePosition) {
-    auto reader = std::make_shared<LasReader>(officeLasPath());
+    auto reader = std::make_shared<LasReader>(sampleLasPath());
     auto &attrs = reader->getAttributes();
     auto position = attrs.getAttribute("position");
     auto rowBytes = attrs.getTotalBytes();
@@ -104,7 +109,7 @@ TEST(LasReader, ReadRawDataDecodesToSamePosition) {
 }
 
 TEST(AttributeReaderFactory, CreatesLasReaderForLasExtension) {
-    auto reader = AttributeReader::createReader(officeLasPath());
+    auto reader = AttributeReader::createReader(sampleLasPath());
     ASSERT_NE(reader, nullptr);
     EXPECT_EQ(reader->getType(), AttributeReader::LAS);
 }

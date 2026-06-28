@@ -28,3 +28,12 @@ add_subdirectory(Tests)
 add_executable(${PROJECT_NAME} main.cpp application.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE converter viewer pclite_project)
 target_include_directories(${PROJECT_NAME} PRIVATE src/converter/src src/viewer src/project)
+
+# Lets `cmake --install --prefix <dir>` stage a self-contained release
+# package: the executable plus whatever runtime shared libraries it actually
+# needs (e.g. SDL2.dll on Windows, wherever vcpkg links it dynamically --
+# this is a no-op on platforms/triplets where it's linked statically).
+install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION .)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+    install(FILES $<TARGET_RUNTIME_DLLS:${PROJECT_NAME}> DESTINATION . OPTIONAL)
+endif()
