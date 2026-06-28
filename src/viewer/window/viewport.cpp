@@ -1,5 +1,6 @@
 #include "viewport.h"
 #include "camera/camera.h"
+#include "camera/camera_ray.h"
 #include "mat.h"
 #include "layer/layer.h"
 #include "node_management/node_manager.h"
@@ -138,12 +139,27 @@ void Viewport::onMouseButton(float x, float y, int button, bool pressed, int cli
             pressX_ = x;
             pressY_ = y;
 
-            if (clicks >= 2 && rotationCenterMode_ == RotationCenterMode::DoubleClick && controller_) {
-                RawPick raw = queryPickBuffer(x, y);
-                if (raw.hit)
-                    controller_->recenterTo(vec3d{(double)raw.position.x,
-                                                  (double)raw.position.y,
-                                                  (double)raw.position.z});
+            if (controller_ && !cameras_.empty()) {
+                if (clicks >= 2 && rotationCenterMode_ == RotationCenterMode::DoubleClick) {
+                    RawPick raw = queryPickBuffer(x, y);
+                    if (raw.hit)
+                        controller_->recenterTo(vec3d{(double)raw.position.x,
+                                                      (double)raw.position.y,
+                                                      (double)raw.position.z});
+                } else if (rotationCenterMode_ == RotationCenterMode::Follow) {
+                    auto& cam = *cameras_[0];
+                    vec3d camPos = cam.position();
+                    vec3d camPivot = cam.pivot();
+                    double ddx = camPos.x - camPivot.x, ddy = camPos.y - camPivot.y, ddz = camPos.z - camPivot.z;
+                    double dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+
+                    vec3d dir = cameraScreenRayDirection(camPos, cam.target(), cam.up(),
+                                                         cam.fov(), cam.aspectRatio(),
+                                                         x, y, (float)width_, (float)height_);
+                    controller_->recenterTo({camPos.x + dir.x * dist,
+                                             camPos.y + dir.y * dist,
+                                             camPos.z + dir.z * dist});
+                }
             }
         } else if (leftDragging_) {
             float dx = x - pressX_, dy = y - pressY_;

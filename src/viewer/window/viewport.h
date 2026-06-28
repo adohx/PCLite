@@ -19,10 +19,15 @@ class PointCloudLoader;
 // project open (today's behavior). DoubleClick: double-clicking a point
 // re-pivots the controller there (camera position/orientation unchanged at
 // that instant -- only where subsequent drags orbit around changes), and it
-// stays the pivot until the next double-click.
+// stays the pivot until the next double-click. Follow: every left-button
+// press re-pivots, without needing a GPU pick/hit at all -- the new pivot
+// is just the point along the cursor's view ray at the *same distance* the
+// old pivot was, so it works the same whether the press lands on a point or
+// on empty space.
 enum class RotationCenterMode {
     Fixed,
     DoubleClick,
+    Follow,
 };
 
 // Renders the point-cloud scene into an offscreen texture (rather than

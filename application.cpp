@@ -108,6 +108,8 @@ void Application::drawToolbar() {
                [&] { viewport.setRotationCenterMode(RotationCenterMode::Fixed); });
     modeButton("Double-Click", viewport.rotationCenterMode() == RotationCenterMode::DoubleClick,
                [&] { viewport.setRotationCenterMode(RotationCenterMode::DoubleClick); });
+    modeButton("Follow", viewport.rotationCenterMode() == RotationCenterMode::Follow,
+               [&] { viewport.setRotationCenterMode(RotationCenterMode::Follow); });
 }
 
 void Application::openProject(const ProjectInfo& info) {
