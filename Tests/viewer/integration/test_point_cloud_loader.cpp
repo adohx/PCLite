@@ -47,6 +47,10 @@ struct PointCloudLoaderTest : public ::testing::Test {
     }
 
     void TearDown() override {
+        // loader (and any Node it loaded) must release its open file handles
+        // before we delete the directory they live in -- Windows refuses to
+        // delete a file that's still open, unlike POSIX.
+        loader.reset();
         std::filesystem::remove_all(tempDir);
     }
 };

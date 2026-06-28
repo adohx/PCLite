@@ -166,8 +166,14 @@ TEST(ConverterTest, ConvertsSyntheticLasAndProducesValidOutputs) {
     options.maxPointsPerChunk = 500;
     options.firstChunkSize = 100;
 
-    Converter converter({lasPath.string()}, target.string(), options);
-    ASSERT_TRUE(converter.run());
+    {
+        // Scoped tightly: Converter holds its source AttributeReader (an open
+        // ifstream on lasPath) for its whole lifetime, and Windows refuses to
+        // delete a file that's still open (unlike POSIX) -- it must be gone
+        // before the remove_all() at the end of this test.
+        Converter converter({lasPath.string()}, target.string(), options);
+        ASSERT_TRUE(converter.run());
+    }
 
     ASSERT_TRUE(std::filesystem::exists(target / "metadata.json"));
     ASSERT_TRUE(std::filesystem::exists(target / "hierarchy.bin"));
@@ -248,14 +254,19 @@ TEST(ConverterTest, ProgressCallbackReportsAllStagesAndReachesComplete) {
     options.maxPointsPerChunk = 500;
     options.firstChunkSize = 100;
 
-    Converter converter({lasPath.string()}, target.string(), options);
-
     std::vector<std::pair<std::string, float>> calls;
-    converter.setProgressCallback([&](const std::string &stage, float fraction) {
-        calls.emplace_back(stage, fraction);
-    });
+    {
+        // Scoped tightly: Converter holds its source AttributeReader (an open
+        // ifstream on lasPath) for its whole lifetime, and Windows refuses to
+        // delete a file that's still open (unlike POSIX) -- it must be gone
+        // before the remove_all() at the end of this test.
+        Converter converter({lasPath.string()}, target.string(), options);
+        converter.setProgressCallback([&](const std::string &stage, float fraction) {
+            calls.emplace_back(stage, fraction);
+        });
 
-    ASSERT_TRUE(converter.run());
+        ASSERT_TRUE(converter.run());
+    }
 
     ASSERT_FALSE(calls.empty());
 
