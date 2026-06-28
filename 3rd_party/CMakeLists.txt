@@ -38,10 +38,19 @@ FetchContent_MakeAvailable(laszip)
 
 # laszip's targets don't export their include dirs; expose the dll/ headers
 # (laszip_api.h: laszip_header_struct / laszip_point_struct / laszip_* API,
-# implemented directly by the `laszip` library target, no dlopen involved)
+# implemented directly by the laszip library target, no dlopen involved)
 set(LASZIP_INCLUDE_DIR
     "${laszip_SOURCE_DIR}/dll"
     CACHE PATH "LASzip C API include directory" FORCE)
+
+# LASzip's own CMakeLists.txt appends its major version to the target name
+# on Windows only (laszip -> laszip3), so the actual library target name is
+# platform-dependent; expose the resolved name for subprojects to link against.
+set(LASZIP_LIB_NAME laszip)
+if(WIN32)
+    set(LASZIP_LIB_NAME laszip3)
+endif()
+set(LASZIP_LIB_NAME "${LASZIP_LIB_NAME}" CACHE STRING "Resolved LASzip CMake target name" FORCE)
 
 # ── glad (OpenGL loader) ──────────────────────────────────────────────────────
 # The viewer renders through core-profile OpenGL 3.3 (shaders/VAO/VBO), which
