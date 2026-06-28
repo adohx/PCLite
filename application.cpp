@@ -17,6 +17,19 @@
 #include "painter/plane_fit_ring_painter.h"
 #include "painter/measurement_painter.h"
 
+#include <string>
+
+namespace {
+// Thousands-separated decimal string (e.g. 44026810 -> "44,026,810"), for
+// the point-count stats -- plain %llu is unreadable at point-cloud scale.
+std::string formatWithCommas(uint64_t value) {
+    std::string s = std::to_string(value);
+    for (int pos = (int)s.length() - 3; pos > 0; pos -= 3)
+        s.insert(pos, ",");
+    return s;
+}
+}
+
 Application::Application()
     : mainWindow_(1280, 800, "PCLite"),
       hubPanel_(projectManager_) {
@@ -44,38 +57,57 @@ void Application::drawProperties() {
     if (ImGui::SliderFloat("Point size", &pointSize_, 1.f, 10.f))
         if (currentNodePainter_) currentNodePainter_->setPointSize(pointSize_);
 
-    if (currentLoader_) {
-        ImGui::Separator();
-        ImGui::Text("Total points: %llu", (unsigned long long)currentLoader_->totalPoints());
-        if (currentNodePainter_)
-            ImGui::Text("Displayed points: %llu",
-                        (unsigned long long)currentNodePainter_->visiblePointCount());
+    if (currentLoader_) ImGui::Separator();
+    if (currentLoader_ && ImGui::BeginTable("PointStats", 2)) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted("Total points");
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextUnformatted(formatWithCommas(currentLoader_->totalPoints()).c_str());
+
+        if (currentNodePainter_) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted("Displayed points");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(formatWithCommas(currentNodePainter_->visiblePointCount()).c_str());
+        }
+        ImGui::EndTable();
     }
 }
 
 void Application::drawToolbar() {
     if (mainWindow_.mode() != MainWindow::Mode::Project) return;
 
-    auto& mm = mainWindow_.viewport().measurementManager();
-
-    // Mode-select buttons; no icon font is loaded yet, so these are plain
+    // Mode-select button; no icon font is loaded yet, so these are plain
     // text labels for now -- swap for icon glyphs if/when one is added.
-    auto modeButton = [&](const char* label, MeasurementMode mode) {
-        bool active = mm.mode() == mode;
+    auto modeButton = [&](const char* label, bool active, auto onClick) {
         if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        if (ImGui::Button(label)) mm.setMode(mode);
+        if (ImGui::Button(label)) onClick();
         if (active) ImGui::PopStyleColor();
         ImGui::SameLine();
     };
 
+    auto& mm = mainWindow_.viewport().measurementManager();
     ImGui::TextUnformatted("Measure:");
     ImGui::SameLine();
-    modeButton("None", MeasurementMode::None);
-    modeButton("Distance", MeasurementMode::Distance);
-    modeButton("Angle", MeasurementMode::Angle);
-
+    modeButton("None", mm.mode() == MeasurementMode::None,
+               [&] { mm.setMode(MeasurementMode::None); });
+    modeButton("Distance", mm.mode() == MeasurementMode::Distance,
+               [&] { mm.setMode(MeasurementMode::Distance); });
+    modeButton("Angle", mm.mode() == MeasurementMode::Angle,
+               [&] { mm.setMode(MeasurementMode::Angle); });
     if (mm.mode() != MeasurementMode::None && ImGui::Button("Clear"))
         mm.clear();
+
+    ImGui::SameLine();
+    ImGui::TextUnformatted("  |  Rotate Around:");
+    ImGui::SameLine();
+    auto& viewport = mainWindow_.viewport();
+    modeButton("Fixed", viewport.rotationCenterMode() == RotationCenterMode::Fixed,
+               [&] { viewport.setRotationCenterMode(RotationCenterMode::Fixed); });
+    modeButton("Double-Click", viewport.rotationCenterMode() == RotationCenterMode::DoubleClick,
+               [&] { viewport.setRotationCenterMode(RotationCenterMode::DoubleClick); });
 }
 
 void Application::openProject(const ProjectInfo& info) {

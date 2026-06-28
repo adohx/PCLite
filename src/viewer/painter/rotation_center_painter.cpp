@@ -24,10 +24,10 @@ RotationCenterPainter::~RotationCenterPainter() {
 }
 
 void RotationCenterPainter::syncCamera(const Camera& camera) {
-    target_ = camera.target();
+    pivot_ = camera.pivot();
 
     vec3d pos = camera.position();
-    double dx = pos.x - target_.x, dy = pos.y - target_.y, dz = pos.z - target_.z;
+    double dx = pos.x - pivot_.x, dy = pos.y - pivot_.y, dz = pos.z - pivot_.z;
     cameraDistance_ = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
 
     rebuildGeometry();
@@ -38,7 +38,7 @@ void RotationCenterPainter::rebuildGeometry() {
     // screen size whether the user is zoomed in or far out.
     float arm = std::max(cameraDistance_ * 0.06f, 1e-4f);
 
-    float cx = (float)target_.x, cy = (float)target_.y, cz = (float)target_.z;
+    float cx = (float)pivot_.x, cy = (float)pivot_.y, cz = (float)pivot_.z;
     constexpr float r = 1.f, g = 0.f, b = 1.f; // magenta: contrasts with typical white/grey/brown scans
 
     float verts[] = {

@@ -5,6 +5,7 @@ ProjectionMode Camera::projectionMode() const { return projectionMode_; }
 vec3d Camera::position() const { return position_; }
 vec3d Camera::target() const { return target_; }
 vec3d Camera::up() const { return up_; }
+vec3d Camera::pivot() const { return pivot_; }
 float Camera::fov() const { return fov_; }
 float Camera::nearPlane() const { return near_; }
 float Camera::farPlane() const { return far_; }
@@ -14,6 +15,7 @@ void Camera::setProjectionMode(ProjectionMode mode) { projectionMode_ = mode; }
 void Camera::setPosition(vec3d position) { position_ = position; }
 void Camera::setTarget(vec3d target) { target_ = target; }
 void Camera::setUp(vec3d up) { up_ = up; }
+void Camera::setPivot(vec3d pivot) { pivot_ = pivot; }
 void Camera::setFov(float fov) { fov_ = fov; }
 void Camera::setNearPlane(float near) { near_ = near; }
 void Camera::setFarPlane(float far) { far_ = far; }

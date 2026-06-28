@@ -110,10 +110,12 @@ void FirstPersonController::syncFromCamera(const Camera& cam) {
 
 void FirstPersonController::applyToCamera(Camera& cam) const {
     vec3d fwd = forwardVec();
-    cam.setPosition(position_);
-    cam.setTarget({
+    vec3d target = {
         position_.x + fwd.x,
         position_.y + fwd.y,
         position_.z + fwd.z
-    });
+    };
+    cam.setPosition(position_);
+    cam.setTarget(target);
+    cam.setPivot(target);
 }

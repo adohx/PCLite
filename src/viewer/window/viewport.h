@@ -15,6 +15,16 @@ struct Node;
 class Layer;
 class PointCloudLoader;
 
+// Fixed: orbit always pivots around whatever lookAt()/setTarget() set at
+// project open (today's behavior). DoubleClick: double-clicking a point
+// re-pivots the controller there (camera position/orientation unchanged at
+// that instant -- only where subsequent drags orbit around changes), and it
+// stays the pivot until the next double-click.
+enum class RotationCenterMode {
+    Fixed,
+    DoubleClick,
+};
+
 // Renders the point-cloud scene into an offscreen texture (rather than
 // directly to the screen) so MainWindow can display it inside a dockable
 // ImGui panel alongside the toolbar/status bar/property panels.
@@ -58,6 +68,16 @@ public:
     // the same loader instance it gave to the LOD strategy.
     void setPickAssistLoader(PointCloudLoader* loader) { pickAssistLoader_ = loader; }
 
+    // Switching back to Fixed drops any pivot set by a previous double-click
+    // (controller_->clearRecenter()), so orbiting always reverts cleanly to
+    // "around what you're currently looking at" rather than leaving a
+    // stale picked pivot in effect under the "Fixed" label.
+    void setRotationCenterMode(RotationCenterMode mode) {
+        rotationCenterMode_ = mode;
+        if (mode == RotationCenterMode::Fixed && controller_) controller_->clearRecenter();
+    }
+    RotationCenterMode rotationCenterMode() const { return rotationCenterMode_; }
+
     // Tears down the current project's scene state (layers/cameras/
     // controller/pick state) so the viewport is back to its just-constructed
     // state, ready for a different project to be opened. Waits on any
@@ -71,7 +91,9 @@ public:
     // Input, in panel-local pixel coordinates. MainWindow forwards SDL
     // events here once it has decided they belong to this viewport.
     void onMouseMove(float x, float y);
-    void onMouseButton(float x, float y, int button, bool pressed);
+    // clicks mirrors SDL_MouseButtonEvent::clicks (1 = single, 2 = double,
+    // ...); only consulted on press, for double-click-to-recenter.
+    void onMouseButton(float x, float y, int button, bool pressed, int clicks = 1);
     void onScroll(float delta);
     void onKey(int key, bool pressed);
 
@@ -117,6 +139,7 @@ private:
 
     PickResult lastPick_;
     MeasurementManager measurementManager_;
+    RotationCenterMode rotationCenterMode_ = RotationCenterMode::Fixed;
 
     // Pick-assist plane fit (the ring indicator): computed in two passes.
     // resolvePick() does an immediate fit from whatever's currently
@@ -156,6 +179,20 @@ private:
 
     void resizeFBO(int w, int h);
     void destroyFBO();
+
+    // Raw result of a single pick-buffer query, with no side effects (no
+    // lastPick_/highlight/plane-fit updates) -- used both by resolvePick()
+    // and by the rotation-center-follows-cursor press handler, which needs
+    // a position under the cursor without disturbing the existing
+    // highlight/measurement pick state.
+    struct RawPick {
+        bool hit = false;
+        Node* node = nullptr;
+        int pointIndex = -1;
+        vec3f position{};
+        Layer* layer = nullptr;
+    };
+    RawPick queryPickBuffer(float x, float y);
 
     // Shared core for both pick() and previewAt(): renders a small window
     // around (x, y) into pickFbo_, reads back the nearest non-empty pixel,

@@ -38,5 +38,5 @@ private:
     // Null in Hub mode.
     NodePainter* currentNodePainter_ = nullptr;
 
-    float pointSize_ = 2.f;
+    float pointSize_ = 4.f;
 };

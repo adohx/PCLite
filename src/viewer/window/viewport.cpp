@@ -70,6 +70,7 @@ void Viewport::reset() {
 
     lastPick_ = PickResult{};
     measurementManager_.setMode(MeasurementMode::None);
+    rotationCenterMode_ = RotationCenterMode::Fixed;
     pickAssistLoader_ = nullptr;
     currentHitLayer_ = nullptr;
     currentSearchRadius_ = 0.f;
@@ -131,11 +132,19 @@ void Viewport::onResize(int w, int h) {
     resizeFBO(w, h);
 }
 
-void Viewport::onMouseButton(float x, float y, int button, bool pressed) {
+void Viewport::onMouseButton(float x, float y, int button, bool pressed, int clicks) {
     if (button == SDL_BUTTON_LEFT) {
         if (pressed) {
             pressX_ = x;
             pressY_ = y;
+
+            if (clicks >= 2 && rotationCenterMode_ == RotationCenterMode::DoubleClick && controller_) {
+                RawPick raw = queryPickBuffer(x, y);
+                if (raw.hit)
+                    controller_->recenterTo(vec3d{(double)raw.position.x,
+                                                  (double)raw.position.y,
+                                                  (double)raw.position.z});
+            }
         } else if (leftDragging_) {
             float dx = x - pressX_, dy = y - pressY_;
             if (std::sqrt(dx * dx + dy * dy) <= kClickMoveTolerance) pick(x, y);
@@ -236,9 +245,9 @@ void Viewport::destroyFBO() {
     if (pickFbo_)                { glDeleteFramebuffers(1, &pickFbo_); pickFbo_ = 0; }
 }
 
-Layer* Viewport::resolvePick(float x, float y, float& outRadius) {
-    outRadius = currentSearchRadius_;
-    if (pickFbo_ == 0 || cameras_.empty() || layers_.empty()) return currentHitLayer_;
+Viewport::RawPick Viewport::queryPickBuffer(float x, float y) {
+    RawPick result;
+    if (pickFbo_ == 0 || cameras_.empty() || layers_.empty()) return result;
 
     uint32_t bestNodeId = 0, bestPointIndex = 0;
     bool inBounds = x >= 0.f && y >= 0.f && x < static_cast<float>(width_) && y < static_cast<float>(height_);
@@ -292,29 +301,37 @@ Layer* Viewport::resolvePick(float x, float y, float& outRadius) {
         }
     }
 
-    Node* newNode = nullptr;
-    int newPointIndex = -1;
-    vec3f newPosition{};
-    Layer* newHitLayer = nullptr;
-
     if (bestNodeId != 0) {
         for (auto& layer : layers_) {
             Node* node = layer->nodeManager().nodeForId(bestNodeId);
             if (!node) continue;
             auto points = node->getPoints();
             if ((size_t)bestPointIndex < points.size()) {
-                newNode        = node;
-                newPointIndex  = (int)bestPointIndex;
-                newPosition    = points[bestPointIndex];
-                newHitLayer    = layer.get();
+                result.hit        = true;
+                result.node       = node;
+                result.pointIndex = (int)bestPointIndex;
+                result.position   = points[bestPointIndex];
+                result.layer      = layer.get();
             }
             break;
         }
     }
+    return result;
+}
+
+Layer* Viewport::resolvePick(float x, float y, float& outRadius) {
+    outRadius = currentSearchRadius_;
+    if (pickFbo_ == 0 || cameras_.empty() || layers_.empty()) return currentHitLayer_;
+
+    RawPick raw = queryPickBuffer(x, y);
+    Node* newNode        = raw.node;
+    int newPointIndex     = raw.pointIndex;
+    vec3f newPosition     = raw.position;
+    Layer* newHitLayer    = raw.layer;
 
     bool changed = (newNode != lastPick_.node) || (newPointIndex != lastPick_.pointIndex);
 
-    lastPick_.hit        = (newNode != nullptr);
+    lastPick_.hit        = raw.hit;
     lastPick_.node       = newNode;
     lastPick_.pointIndex = newPointIndex;
     lastPick_.position   = newPosition;

@@ -252,7 +252,7 @@ void MainWindow::handleEvent(const SDL_Event& e) {
         if (viewportHovered_)
             viewport_->onMouseButton((float)e.button.x - viewportOriginX_,
                                       (float)e.button.y - viewportOriginY_,
-                                      e.button.button, true);
+                                      e.button.button, true, e.button.clicks);
         break;
 
     case SDL_MOUSEBUTTONUP:

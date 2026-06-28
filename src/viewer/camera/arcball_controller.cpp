@@ -15,6 +15,8 @@ static vec3d vecNorm(vec3d v) {
     if (len < 1e-10) return {0.0, 0.0, 1.0};
     return {v.x/len, v.y/len, v.z/len};
 }
+static vec3d vecSub(vec3d a, vec3d b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
+static vec3d vecAdd(vec3d a, vec3d b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
 static double dot(vec3d a, vec3d b) {
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
@@ -65,11 +67,13 @@ void ArcballController::onMouseButtonDown(int button, float x, float y) {
 
 void ArcballController::onMouseDrag(int button, float dx, float dy) {
     if (button == kLeftButton) {
-        // Current camera basis in world space
-        vec3d arm_dir = vecNorm(arm_);
-        vec3d fwd     = {-arm_dir.x, -arm_dir.y, -arm_dir.z};
+        // Current camera basis in world space, derived from the actual
+        // viewing direction (target_ - position_) -- not from pivot_, so
+        // the sphere mapping always matches what's actually on screen.
+        vec3d fwd     = vecNorm(vecSub(target_, position_));
         vec3d rgt     = vecNorm(cross(fwd, up_));
         vec3d up_cam  = vecNorm(cross(rgt, fwd));
+        vec3d arm_dir = {-fwd.x, -fwd.y, -fwd.z};
 
         // Sphere points are in screen space (rgt=+X, up_cam=+Y, arm_dir=+Z).
         // Transform to world space so the rotation axis is correct regardless
@@ -96,20 +100,42 @@ void ArcballController::onMouseDrag(int button, float dx, float dy) {
         double angle = std::acos(std::clamp(dot(p1, p2), -1.0, 1.0));
         vec3d  k     = vecNorm(axis);
 
-        arm_ = rodrigues(arm_, k, -angle);
-        up_  = rodrigues(up_,  k, -angle);
+        // Rotate position_ and target_ rigidly together around pivot_ (by
+        // rotating their pivot-relative vectors by the same angle), instead
+        // of just rotating the camera around a fixed target_. When
+        // pivot_ == target_ (the default -- recenterTo() was never called)
+        // this reduces exactly to "rotate the camera around the target,"
+        // i.e. today's classic arcball behavior.
+        vec3d posRel = rodrigues(vecSub(position_, pivot_), k, -angle);
+        vec3d tgtRel = rodrigues(vecSub(target_,   pivot_), k, -angle);
+        up_ = rodrigues(up_, k, -angle);
+
+        position_ = vecAdd(pivot_, posRel);
+        target_   = vecAdd(pivot_, tgtRel);
         return;
     }
     if (button == kRightButton) applyPan(dx, dy);
 }
 
+void ArcballController::recenterTo(vec3d point) {
+    // position_/target_/up_ are untouched -- so this can never move the
+    // camera or change what's rendered; it only changes what onMouseDrag
+    // revolves around on the next drag.
+    pivot_ = point;
+}
+
+void ArcballController::clearRecenter() {
+    pivot_ = target_;
+}
+
 void ArcballController::onScroll(float delta) {
-    double dist    = vecLen(arm_);
+    vec3d arm  = vecSub(position_, target_);
+    double dist    = vecLen(arm);
     double newDist = dist * (delta > 0.f ? 0.85 : 1.18);
     newDist = std::clamp(newDist, 0.5, 5000.0);
-    arm_ = vecNorm(arm_);
-    arm_ = {arm_.x * newDist, arm_.y * newDist, arm_.z * newDist};
-    // up_ is perpendicular to arm_ — scroll doesn't change orientation
+    vec3d dir = vecNorm(arm);
+    position_ = vecAdd(target_, {dir.x * newDist, dir.y * newDist, dir.z * newDist});
+    // up_ is perpendicular to the view direction — scroll doesn't change orientation
 }
 
 void ArcballController::onResize(int w, int h) {
@@ -118,29 +144,37 @@ void ArcballController::onResize(int w, int h) {
 }
 
 void ArcballController::syncFromCamera(const Camera& cam) {
-    fov_    = cam.fov();
-    target_ = cam.target();
-    auto pos = cam.position();
-    arm_ = {pos.x - target_.x, pos.y - target_.y, pos.z - target_.z};
-    up_  = cam.up();
+    fov_      = cam.fov();
+    target_   = cam.target();
+    position_ = cam.position();
+    pivot_    = target_; // (re)start with the classic "orbit what you're looking at" default
+    up_       = cam.up();
 }
 
 void ArcballController::applyToCamera(Camera& cam) const {
     cam.setTarget(target_);
-    cam.setPosition({target_.x + arm_.x, target_.y + arm_.y, target_.z + arm_.z});
+    cam.setPosition(position_);
     cam.setUp(up_);
+    cam.setPivot(pivot_);
 }
 
 void ArcballController::applyPan(float dx, float dy) {
-    // Derive camera basis from tracked arm_ and up_ (no world-Y assumption)
-    vec3d fwd = vecNorm({-arm_.x, -arm_.y, -arm_.z});  // camera → target
+    // Derive camera basis from the actual viewing direction (no world-Y assumption)
+    vec3d arm = vecSub(position_, target_);
+    vec3d fwd = vecNorm({-arm.x, -arm.y, -arm.z});  // camera → target
     vec3d rgt = vecNorm(cross(fwd, up_));
     vec3d up  = cross(rgt, fwd);  // re-orthogonalised up
 
     float fovRad = fov_ * (float)M_PI / 180.f;
-    float scale  = 2.f * (float)vecLen(arm_) * std::tan(fovRad * 0.5f) / (float)height_;
+    float scale  = 2.f * (float)vecLen(arm) * std::tan(fovRad * 0.5f) / (float)height_;
 
-    target_.x += (double)(-dx * scale * rgt.x + dy * scale * up.x);
-    target_.y += (double)(-dx * scale * rgt.y + dy * scale * up.y);
-    target_.z += (double)(-dx * scale * rgt.z + dy * scale * up.z);
+    vec3d delta = {
+        (double)(-dx * scale * rgt.x + dy * scale * up.x),
+        (double)(-dx * scale * rgt.y + dy * scale * up.y),
+        (double)(-dx * scale * rgt.z + dy * scale * up.z),
+    };
+    // Pan translates the camera+target rigidly; the orbit pivot (if it was
+    // recentered to a specific world point) deliberately stays put.
+    target_   = vecAdd(target_,   delta);
+    position_ = vecAdd(position_, delta);
 }

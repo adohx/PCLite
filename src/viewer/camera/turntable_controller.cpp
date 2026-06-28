@@ -47,6 +47,7 @@ void TurntableController::applyToCamera(Camera& cam) const {
         target_.y + distance_ * std::sin(el),
         target_.z + distance_ * std::cos(el) * std::cos(az)
     });
+    cam.setPivot(target_);
 }
 
 void TurntableController::applyPan(float dx, float dy) {

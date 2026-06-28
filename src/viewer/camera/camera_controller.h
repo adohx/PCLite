@@ -13,6 +13,17 @@ public:
     // Called by the window when a button is held and the mouse moves.
     virtual void onMouseDrag(int button, float dx, float dy) = 0;
 
+    // Re-pivots the controller's orbit center to `point` without moving the
+    // camera's current position/orientation (only where it orbits around
+    // next changes). No-op for controllers that don't have an orbit pivot
+    // (e.g. a first-person controller).
+    virtual void recenterTo(vec3d /*point*/) {}
+
+    // Drops any recenterTo() override, going back to orbiting around
+    // wherever the camera is currently looking. No-op for controllers that
+    // don't have an orbit pivot.
+    virtual void clearRecenter() {}
+
     // Called by the window on scroll wheel movement (delta > 0 = zoom in).
     virtual void onScroll(float delta) = 0;
 

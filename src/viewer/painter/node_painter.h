@@ -55,7 +55,7 @@ private:
 
     Node* highlightNode_ = nullptr;
     int highlightIndex_ = -1;
-    float pointSize_ = 2.f;
+    float pointSize_ = 4.f;
 
     Batch createBatch(const Node* node) const;
     static void destroyBatch(Batch& batch);
