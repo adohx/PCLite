@@ -4,11 +4,13 @@
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
+#include "version.h"
 
 MainWindow::MainWindow(int w, int h, const std::string& title) : title_(title) {
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
@@ -120,6 +122,13 @@ void MainWindow::drawMenuBar() {
         if (ImGui::MenuItem("Exit")) running_ = false;
         ImGui::EndMenu();
     }
+
+    if (ImGui::BeginMenu("Help")) {
+        std::string label = "PCLite v" + std::string(PCLITE_VERSION_STRING);
+        ImGui::MenuItem(label.c_str(), nullptr, false, false); // display-only, not clickable
+        ImGui::EndMenu();
+    }
+
     ImGui::EndMainMenuBar();
 }
 
