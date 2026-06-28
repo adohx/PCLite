@@ -29,6 +29,14 @@ add_executable(${PROJECT_NAME} main.cpp application.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE converter viewer pclite_project)
 target_include_directories(${PROJECT_NAME} PRIVATE src/converter/src src/viewer src/project)
 
+# SDL2's headers rename main() to SDL_main() on Windows (SDL_MAIN_AVAILABLE),
+# expecting SDL2main.lib to supply the real entry point that calls it; without
+# it the linker can't find a `main` symbol at all. Not needed on platforms
+# where SDL2 doesn't perform that rename (e.g. Linux).
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2main)
+endif()
+
 # Lets `cmake --install --prefix <dir>` stage a self-contained release
 # package: the executable plus whatever runtime shared libraries it actually
 # needs (e.g. SDL2.dll on Windows, wherever vcpkg links it dynamically --
