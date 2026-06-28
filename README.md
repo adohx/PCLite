@@ -2,7 +2,7 @@
 
 PCLite is a lightweight desktop application for viewing and measuring large-scale point clouds, built with C++20, OpenGL, SDL2 and Dear ImGui.
 
-![Distance measurement on a 44M-point indoor scan, decomposed into point-to-point / perpendicular-to-plane / in-plane components](screenshoots/measuring.jpg)
+![Distance measurement on a 44M-point indoor scan, decomposed into point-to-point / perpendicular-to-plane / in-plane components](screenshots/measuring.jpg)
 
 ## Why
 

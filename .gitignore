@@ -80,3 +80,4 @@ Testing/
 # (office.las and friends) is large, local-only dev data.
 !/test_data/sample.las
 /.vs
+/.idea
