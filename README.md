@@ -2,13 +2,15 @@
 
 PCLite is a lightweight desktop application for viewing and measuring large-scale point clouds, built with C++20, OpenGL, SDL2 and Dear ImGui.
 
+![Distance measurement on a 44M-point indoor scan, decomposed into point-to-point / perpendicular-to-plane / in-plane components](screenshoots/measuring.jpg)
+
 ## Why
 
 Common point cloud formats (LAS, PCD, ...) load as a single flat blob, so once a point cloud gets large enough it simply doesn't fit in memory and can't be visualized or processed. PCLite is built around solving that problem end to end:
 
 - **Out-of-core point cloud format** — a chunked, level-of-detail octree format (conceptually similar to Potree), produced by a multi-stage converter
 - **Real-time visualization** — OpenGL rendering that streams nodes in/out based on screen-space error (LOD), instead of holding the whole point cloud in memory
-- **Interactive measurement** — GPU-based point picking with a live, KD-tree-assisted local plane fit, as the foundation for distance/angle/area/volume measurement tools
+- **Interactive measurement** — distance and angle measurement directly on the point cloud, built on GPU-based point picking with a live, KD-tree-assisted local plane fit: distance decomposes into point-to-point / perpendicular-to-plane / in-plane components, angle shows a live arc + readout
 - **Project-based workflow** — create/open/manage point cloud projects, import raw LAS files with live progress, no manual file wrangling
 
 ## Performance
@@ -39,7 +41,7 @@ Interactive visualization + point picking / measurement
 | viewer | `src/viewer` | Window/camera/layers/node streaming/rendering/picking | Implemented |
 | project | `src/project` | Project create/open/close/delete, recent list, LAS import | Implemented |
 | ui | Dear ImGui (vendored) | Docking chrome (Hub / Project mode), panels, file browser | Implemented |
-| measurement | `src/measurement` | Distance/angle/area/volume measurement on top of picking | Planned |
+| measurement | `src/viewer/measurement` | Distance & angle measurement (plane-fit decomposition, angle arc) on top of picking | Implemented |
 
 ## Repository layout
 
@@ -50,7 +52,7 @@ PCLite/
 ├── main.cpp / application.{h,cpp}        Application entry point & orchestrator
 ├── 3rd_party/                             Vendored/FetchContent dependencies (ImGui, glad, ThreadPool, ...)
 ├── cmake/                                 CMake helper modules
-└── src/                                   core / converter / viewer / project / measurement
+└── src/                                   core / converter / viewer (incl. measurement) / project / utilities
 ```
 
 ## Building
@@ -83,6 +85,10 @@ cmake --build --preset x64-Debug
 
 The app opens to a project hub: create a new project from a LAS file (converted in the background with progress feedback), or open one from the recent/all-projects list. Inside a project, the viewer supports arcball navigation (left-drag to rotate, right-drag to pan, scroll to zoom) and point picking (click or hover a point to highlight it and preview the locally-fitted plane).
 
+The toolbar (see screenshot above) switches two independent modes:
+- **Measure**: `None` / `Distance` (click 2 points — decomposes into point-to-point, perpendicular-to-plane, and in-plane distances) / `Angle` (click 3 points — vertex is the 2nd click) / `Clear`.
+- **Rotate Around**: `Fixed` (orbit the original look-at target), `Double-Click` (double-click a point to re-pivot orbiting there), `Follow` (every press re-pivots to whatever's under the cursor, at the same distance as the current pivot — works over empty space too).
+
 ## Testing
 
 Tests use GoogleTest + CTest, split per module (`core`, `converter`, `project`, `viewer`).
@@ -95,4 +101,4 @@ cd <build_dir> && ctest --output-on-failure
 ## Status
 
 - ✅ Project management, converter, and viewer (LOD streaming, rendering, GPU point picking with plane-fit assist) are implemented and tested
-- 📋 Measurement (distance/angle/area/volume) is planned, not yet started
+- ✅ Measurement: distance (point-to-point / perpendicular-to-plane / in-plane decomposition) and angle (live arc + readout) are implemented, with screen-space value labels and a toolbar mode switch
